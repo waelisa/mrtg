@@ -1,7 +1,9 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Production Ready
-# Enterprise-grade network monitoring for DirectAdmin and other hosting control panels
+# MRTG Professional Monitoring Suite - Enterprise Ready
+# Intelligent detection - Works with existing server configurations
+# Version: v1.2.0 | Build Date: 02/27/2026
+# Author: Wael Isa | GitHub: https://github.com/waelisa/mrtg
 #
 # =============================================================================
 # ██╗    ██╗ █████╗ ███████╗██╗         ██╗███████╗ █████╗
@@ -12,62 +14,35 @@
 # ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝    ╚═╝╚══════╝╚═╝  ╚═╝
 # =============================================================================
 #
-# Author:      Wael Isa
-# Website:     https://www.wael.name
-# GitHub:      https://github.com/waelisa
-# Version:     v1.0.0
-# Build Date:  02/27/2026
-# License:     MIT
-#
-# Description:
-#   Fully automated MRTG installation and configuration script for hosting environments.
-#   Supports DirectAdmin, cPanel, Plesk, and custom servers with enterprise-grade
-#   monitoring capabilities.
+# ⚠️  SAFETY FIRST: This script NEVER installs/overwrites web servers
+# ⚠️  It detects and uses existing web server configurations
+# ⚠️  Works with: Apache, Nginx, LiteSpeed, OpenLiteSpeed, Caddy
 #
 # Features:
-#   • Interactive menu-driven interface
-#   • Command-line arguments support
-#   • Multi-control panel support (DirectAdmin, cPanel, Plesk)
-#   • Automatic dependency installation
-#   • Customizable monitoring intervals
-#   • Email alerts and notifications
-#   • Multi-interface monitoring
-#   • Bandwidth graphing and reporting
-#   • Automatic cron job management
-#   • Backup and restore functionality
-#   • SSL/TLS support for secure access
-#   • Performance optimization tools
+#   • Intelligent web server detection (Apache/Nginx/LiteSpeed/Caddy)
+#   • No web server installation - uses existing setup
+#   • CSF firewall integration with safety checks
+#   • Custom SNMP community strings (no more 'public')
+#   • Full uninstall with configuration backup
+#   • DirectAdmin/cPanel/Plesk detection
+#   • Multi-distro support (Debian, Ubuntu, CentOS, Alma, Rocky)
+#   • Dry-run mode for testing
+#   • Configuration validation before applying
 #
 # Usage:
-#   ./install-mrtg.sh [OPTIONS]
-#
-# Options:
-#   --help, -h              Show this help message
-#   --install, -i           Run installation wizard
-#   --uninstall, -u         Complete uninstall MRTG
-#   --cron-add, -ca         Add MRTG to crontab
-#   --cron-remove, -cr      Remove MRTG from crontab
-#   --configure, -c         Reconfigure existing installation
-#   --backup, -b            Backup MRTG configuration
-#   --restore, -r           Restore MRTG configuration
-#   --status, -s            Check MRTG service status
-#   --version, -v           Show version information
-#
-# Examples:
-#   ./install-mrtg.sh --install
-#   ./install-mrtg.sh --uninstall
-#   ./install-mrtg.sh --cron-add --interval 5
+#   ./install-mrtg.sh --install           # Interactive installation
+#   ./install-mrtg.sh --uninstall          # Complete removal
+#   ./install-mrtg.sh --dry-run            # Test without changes
+#   ./install-mrtg.sh --help               # Show help
 #
 # =============================================================================
 
-# Strict mode
 set -euo pipefail
 IFS=$'\n\t'
 
 # =============================================================================
-# COLOR CODES FOR BEAUTIFUL OUTPUT
+# COLOR CODES
 # =============================================================================
-
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -75,35 +50,37 @@ readonly BLUE='\033[0;34m'
 readonly MAGENTA='\033[0;35m'
 readonly CYAN='\033[0;36m'
 readonly WHITE='\033[1;37m'
-readonly NC='\033[0m' # No Color
+readonly NC='\033[0m'
 readonly BOLD='\033[1m'
 
 # =============================================================================
 # SCRIPT CONFIGURATION
 # =============================================================================
-
-readonly SCRIPT_NAME="MRTG Professional Monitoring Suite"
-readonly SCRIPT_VERSION="v1.0.0"
+readonly SCRIPT_VERSION="v1.2.0"
 readonly SCRIPT_AUTHOR="Wael Isa"
-readonly SCRIPT_URL="https://www.wael.name"
-readonly SCRIPT_GITHUB="https://github.com/waelisa/mrtg-monitor"
-
-# Installation paths
-readonly MRTG_BASE="/usr/local/mrtg"
-readonly MRTG_CONF="${MRTG_BASE}/conf"
-readonly MRTG_HTML="${MRTG_BASE}/html"
-readonly MRTG_LOG="${MRTG_BASE}/logs"
-readonly MRTG_BIN="${MRTG_BASE}/bin"
-readonly MRTG_BACKUP="${MRTG_BASE}/backups"
-readonly MRTG_VAR="/var/lib/mrtg"
-
-# Log file
+readonly SCRIPT_URL="https://github.com/waelisa/mrtg"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
+readonly CONFIG_BACKUP_DIR="/root/mrtg-backups"
 
-# Default values
+# Installation paths (configurable)
+MRTG_BASE="/usr/local/mrtg"
+MRTG_CONF="${MRTG_BASE}/conf"
+MRTG_LOG="${MRTG_BASE}/logs"
+MRTG_HTML="${MRTG_BASE}/html"
+MRTG_BIN="${MRTG_BASE}/bin"
+MRTG_VAR="/var/lib/mrtg"
+
+# Default values (will be detected/overridden)
 DEFAULT_INTERVAL=5
-DEFAULT_HTML_DIR="/var/www/html/mrtg"
 DEFAULT_EMAIL="root@localhost"
+SNMP_COMMUNITY=""
+WEB_ROOT=""
+WEB_USER=""
+WEB_GROUP=""
+WEB_SERVER="unknown"
+
+# Dry run mode
+DRY_RUN=false
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -116,13 +93,17 @@ log() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo -e "${timestamp} [${level}] ${message}" >> "${LOG_FILE}"
 
-    case "${level}" in
-        "ERROR")   echo -e "${RED}[ERROR]${NC} ${message}" ;;
-        "WARNING") echo -e "${YELLOW}[WARNING]${NC} ${message}" ;;
-        "SUCCESS") echo -e "${GREEN}[SUCCESS]${NC} ${message}" ;;
-        "INFO")    echo -e "${CYAN}[INFO]${NC} ${message}" ;;
-        *)         echo -e "${message}" ;;
-    esac
+    if [[ "${DRY_RUN}" == true && "${level}" != "ERROR" ]]; then
+        echo -e "${YELLOW}[DRY RUN]${NC} ${message}"
+    else
+        case "${level}" in
+            "ERROR")   echo -e "${RED}[ERROR]${NC} ${message}" ;;
+            "WARNING") echo -e "${YELLOW}[WARNING]${NC} ${message}" ;;
+            "SUCCESS") echo -e "${GREEN}[SUCCESS]${NC} ${message}" ;;
+            "INFO")    echo -e "${CYAN}[INFO]${NC} ${message}" ;;
+            *)         echo -e "${message}" ;;
+        esac
+    fi
 }
 
 error_exit() {
@@ -136,88 +117,23 @@ check_root() {
     fi
 }
 
-print_banner() {
-    clear
-    cat << "EOF"
-================================================================================
-██╗    ██╗ █████╗ ███████╗██╗         ██╗███████╗ █████╗
-██║    ██║██╔══██╗██╔════╝██║         ██║██╔════╝██╔══██╗
-██║ █╗ ██║███████║█████╗  ██║         ██║███████╗███████║
-██║███╗██║██╔══██║██╔══╝  ██║         ██║╚════██║██╔══██║
-╚███╔███╔╝██║  ██║███████╗███████╗    ██║███████╗██║  ██║
- ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝    ╚═╝╚══════╝╚═╝  ╚═╝
-================================================================================
-    ${BOLD}${SCRIPT_NAME}${NC}
-    Version: ${SCRIPT_VERSION} | Author: ${SCRIPT_AUTHOR}
-    Website: ${SCRIPT_URL} | GitHub: ${SCRIPT_GITHUB}
-================================================================================
-EOF
-    echo ""
-}
+confirm_action() {
+    local prompt="$1"
+    local default="${2:-N}"
 
-print_help() {
-    cat << EOF
-${BOLD}NAME${NC}
-    ${SCRIPT_NAME} - Enterprise-grade network monitoring solution
+    if [[ "${DRY_RUN}" == true ]]; then
+        return 0
+    fi
 
-${BOLD}SYNOPSIS${NC}
-    $0 [OPTIONS]
-
-${BOLD}DESCRIPTION${NC}
-    Fully automated MRTG installation and configuration script for hosting
-    environments. Supports DirectAdmin, cPanel, Plesk, and custom servers.
-
-${BOLD}OPTIONS${NC}
-    ${GREEN}--help, -h${NC}              Show this help message
-    ${GREEN}--install, -i${NC}           Run installation wizard
-    ${GREEN}--uninstall, -u${NC}          Complete uninstall MRTG
-    ${GREEN}--cron-add, -ca${NC}          Add MRTG to crontab
-    ${GREEN}--cron-remove, -cr${NC}       Remove MRTG from crontab
-    ${GREEN}--configure, -c${NC}          Reconfigure existing installation
-    ${GREEN}--backup, -b${NC}             Backup MRTG configuration
-    ${GREEN}--restore, -r${NC}            Restore MRTG configuration
-    ${GREEN}--status, -s${NC}             Check MRTG service status
-    ${GREEN}--version, -v${NC}            Show version information
-    ${GREEN}--interval, -in${NC} [MIN]     Set monitoring interval (default: ${DEFAULT_INTERVAL})
-    ${GREEN}--email, -e${NC} [ADDRESS]     Set notification email
-    ${GREEN}--html-dir, -hd${NC} [PATH]    Set HTML output directory
-
-${BOLD}EXAMPLES${NC}
-    $0 --install                    # Interactive installation
-    $0 --install --interval 5       # Install with 5-minute intervals
-    $0 --cron-add --interval 10     # Add cron job with 10-minute intervals
-    $0 --uninstall --force          # Force uninstall without confirmation
-
-${BOLD}FILES${NC}
-    ${MRTG_BASE}              Main installation directory
-    ${MRTG_CONF}              Configuration files
-    ${MRTG_HTML}              HTML output files
-    ${MRTG_LOG}               Log files
-    ${MRTG_BACKUP}            Backup directory
-
-${BOLD}EXIT CODES${NC}
-    0   Success
-    1   General error
-    2   Permission denied
-    3   Invalid argument
-    4   Installation failed
-    5   Uninstall failed
-
-${BOLD}AUTHOR${NC}
-    Written by ${SCRIPT_AUTHOR} <${SCRIPT_URL}>
-
-${BOLD}REPORTING BUGS${NC}
-    ${SCRIPT_GITHUB}/issues
-
-${BOLD}COPYRIGHT${NC}
-    Copyright (c) $(date +%Y) ${SCRIPT_AUTHOR}. License: MIT
-    This is free software; see the source for copying conditions.
-
-EOF
+    read -p "${prompt} (y/N): " response
+    if [[ "${response}" =~ ^[Yy]$ ]]; then
+        return 0
+    fi
+    return 1
 }
 
 # =============================================================================
-# DETECTION FUNCTIONS
+# DETECTION FUNCTIONS (NO ASSUMPTIONS)
 # =============================================================================
 
 detect_os() {
@@ -225,18 +141,11 @@ detect_os() {
         . /etc/os-release
         OS=$NAME
         VER=$VERSION_ID
-    elif type lsb_release >/dev/null 2>&1; then
-        OS=$(lsb_release -si)
-        VER=$(lsb_release -sr)
-    elif [[ -f /etc/debian_version ]]; then
-        OS="Debian"
-        VER=$(cat /etc/debian_version)
-    elif [[ -f /etc/redhat-release ]]; then
-        OS="Red Hat"
-        VER=$(cat /etc/redhat-release | sed s/.*release\ // | sed s/\ .*//)
+        OS_ID=$ID
     else
         OS="Unknown"
         VER="Unknown"
+        OS_ID="unknown"
     fi
     log "INFO" "Detected OS: ${OS} ${VER}"
 }
@@ -244,73 +153,206 @@ detect_os() {
 detect_control_panel() {
     local panel="none"
 
-    # DirectAdmin detection
     if [[ -d /usr/local/directadmin ]]; then
         panel="directadmin"
         log "INFO" "DirectAdmin control panel detected"
-    # cPanel detection
     elif [[ -d /usr/local/cpanel ]]; then
         panel="cpanel"
         log "INFO" "cPanel control panel detected"
-    # Plesk detection
     elif [[ -d /usr/local/psa ]]; then
         panel="plesk"
         log "INFO" "Plesk control panel detected"
-    # Webmin detection
-    elif [[ -d /usr/libexec/webmin ]]; then
-        panel="webmin"
-        log "INFO" "Webmin control panel detected"
-    # ISPConfig detection
     elif [[ -d /usr/local/ispconfig ]]; then
         panel="ispconfig"
-        log "INFO" "ISPConfig control panel detected"
+        log "INFO" "ISPConfig detected"
+    elif [[ -d /usr/local/virtualmin ]]; then
+        panel="virtualmin"
+        log "INFO" "Virtualmin detected"
     fi
 
     echo "${panel}"
 }
 
+detect_web_server() {
+    log "INFO" "Detecting web server (without installing anything)..."
+
+    # Check for running web servers (most reliable)
+    if pgrep -x "nginx" >/dev/null 2>&1; then
+        WEB_SERVER="nginx"
+        WEB_USER=$(ps aux | grep nginx | grep -v grep | head -1 | awk '{print $1}' || echo "www-data")
+        WEB_GROUP=$(id -gn ${WEB_USER} 2>/dev/null || echo "www-data")
+        log "SUCCESS" "Detected running Nginx server"
+
+    elif pgrep -x "httpd" >/dev/null 2>&1 || pgrep -x "apache2" >/dev/null 2>&1; then
+        WEB_SERVER="apache"
+        if [[ -f /etc/redhat-release ]]; then
+            WEB_USER="apache"
+            WEB_GROUP="apache"
+        else
+            WEB_USER="www-data"
+            WEB_GROUP="www-data"
+        fi
+        log "SUCCESS" "Detected running Apache server"
+
+    elif pgrep -x "litespeed" >/dev/null 2>&1 || pgrep -x "lshttpd" >/dev/null 2>&1; then
+        WEB_SERVER="litespeed"
+        WEB_USER="nobody"
+        WEB_GROUP="nobody"
+        log "SUCCESS" "Detected running LiteSpeed server"
+
+    elif pgrep -x "caddy" >/dev/null 2>&1; then
+        WEB_SERVER="caddy"
+        WEB_USER=$(ps aux | grep caddy | grep -v grep | head -1 | awk '{print $1}' || echo "caddy")
+        WEB_GROUP=$(id -gn ${WEB_USER} 2>/dev/null || echo "caddy")
+        log "SUCCESS" "Detected running Caddy server"
+
+    else
+        # Fallback: Check for installed but not running
+        if command -v nginx >/dev/null 2>&1; then
+            WEB_SERVER="nginx"
+            WEB_USER="www-data"
+            WEB_GROUP="www-data"
+            log "WARNING" "Nginx installed but not running"
+        elif command -v apache2 >/dev/null 2>&1 || command -v httpd >/dev/null 2>&1; then
+            WEB_SERVER="apache"
+            if [[ -f /etc/redhat-release ]]; then
+                WEB_USER="apache"
+                WEB_GROUP="apache"
+            else
+                WEB_USER="www-data"
+                WEB_GROUP="www-data"
+            fi
+            log "WARNING" "Apache installed but not running"
+        else
+            log "ERROR" "No supported web server detected!"
+            log "INFO" "Please install Nginx, Apache, or LiteSpeed first"
+            return 1
+        fi
+    fi
+
+    # Detect web root based on server type and OS
+    detect_web_root
+}
+
+detect_web_root() {
+    # Common web roots based on server type and OS
+    local panel=$(detect_control_panel)
+
+    # Panel-specific paths first
+    case "${panel}" in
+        "directadmin")
+            WEB_ROOT="/var/www/html"
+            ;;
+        "cpanel")
+            if [[ -d "/usr/local/apache/htdocs" ]]; then
+                WEB_ROOT="/usr/local/apache/htdocs"
+            else
+                WEB_ROOT="/home/*/public_html"  # Multiple user dirs
+            fi
+            ;;
+        "plesk")
+            WEB_ROOT="/var/www/vhosts"
+            ;;
+        *)
+            # Generic paths based on web server
+            case "${WEB_SERVER}" in
+                "nginx")
+                    if [[ -d "/usr/share/nginx/html" ]]; then
+                        WEB_ROOT="/usr/share/nginx/html"
+                    elif [[ -d "/var/www/html" ]]; then
+                        WEB_ROOT="/var/www/html"
+                    elif [[ -d "/srv/www/htdocs" ]]; then
+                        WEB_ROOT="/srv/www/htdocs"
+                    fi
+                    ;;
+                "apache")
+                    if [[ -d "/var/www/html" ]]; then
+                        WEB_ROOT="/var/www/html"
+                    elif [[ -d "/var/www" ]]; then
+                        WEB_ROOT="/var/www"
+                    elif [[ -d "/srv/www/htdocs" ]]; then
+                        WEB_ROOT="/srv/www/htdocs"
+                    fi
+                    ;;
+                "litespeed")
+                    if [[ -d "/usr/local/lsws/htdocs" ]]; then
+                        WEB_ROOT="/usr/local/lsws/htdocs"
+                    fi
+                    ;;
+                "caddy")
+                    if [[ -d "/var/www/html" ]]; then
+                        WEB_ROOT="/var/www/html"
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+
+    # Verify web root exists
+    if [[ ! -d "${WEB_ROOT}" ]]; then
+        log "WARNING" "Default web root ${WEB_ROOT} not found"
+        # Try to find any writable web directory
+        WEB_ROOT=$(find /var/www -type d -name "html" -o -name "htdocs" 2>/dev/null | head -1)
+        if [[ -z "${WEB_ROOT}" ]]; then
+            WEB_ROOT="/var/www/html"  # Fallback, will create if needed
+        fi
+    fi
+
+    log "INFO" "Web root set to: ${WEB_ROOT}"
+}
+
 detect_network_interfaces() {
     local interfaces=()
 
-    # Get all network interfaces except loopback
-    for interface in $(ls /sys/class/net/ | grep -v lo); do
-        interfaces+=("${interface}")
+    # Get all network interfaces except loopback and virtual
+    for interface in $(ls /sys/class/net/ | grep -vE 'lo|virbr|docker|veth'); do
+        # Check if interface has an IP address
+        if ip addr show "${interface}" 2>/dev/null | grep -q "inet "; then
+            interfaces+=("${interface}")
+        fi
     done
+
+    # If no interfaces found, fallback to all except loopback
+    if [[ ${#interfaces[@]} -eq 0 ]]; then
+        for interface in $(ls /sys/class/net/ | grep -v lo); do
+            interfaces+=("${interface}")
+        done
+    fi
 
     echo "${interfaces[@]}"
 }
 
 # =============================================================================
-# INSTALLATION FUNCTIONS
+# SAFE INSTALLATION FUNCTIONS (NO WEB SERVER INSTALLATION)
 # =============================================================================
 
 install_dependencies() {
-    log "INFO" "Installing dependencies..."
+    log "INFO" "Installing only MRTG and SNMP packages (no web server)..."
 
-    case "${OS}" in
-        *"Ubuntu"*|*"Debian"*)
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would install: mrtg, snmpd, snmp, perl modules"
+        return 0
+    fi
+
+    case "${OS_ID}" in
+        ubuntu|debian)
             apt-get update -y
-            apt-get install -y mrtg snmpd snmp libsnmp-dev apache2 \
-                               gcc make perl libwww-perl libcrypt-ssleay-perl \
+            apt-get install -y mrtg snmpd snmp libsnmp-dev \
+                               perl libwww-perl libcrypt-ssleay-perl \
                                libdigest-hmac-perl libio-socket-ssl-perl \
-                               libnet-snmp-perl libxml-libxml-perl \
-                               wget curl unzip gzip
+                               libnet-snmp-perl --no-install-recommends
             ;;
-        *"CentOS"*|*"Red Hat"*|*"Fedora"*)
-            yum install -y epel-release
-            yum install -y mrtg net-snmp net-snmp-utils net-snmp-devel \
-                           httpd gcc make perl-CPAN perl-libwww-perl \
-                           perl-Crypt-SSLeay perl-Digest-HMAC \
-                           perl-IO-Socket-SSL perl-Net-SNMP \
-                           perl-XML-LibXML wget curl unzip gzip
-            ;;
-        *"AlmaLinux"*|*"Rocky"*)
-            dnf install -y epel-release
-            dnf install -y mrtg net-snmp net-snmp-utils net-snmp-devel \
-                           httpd gcc make perl-CPAN perl-libwww-perl \
-                           perl-Crypt-SSLeay perl-Digest-HMAC \
-                           perl-IO-Socket-SSL perl-Net-SNMP \
-                           perl-XML-LibXML wget curl unzip gzip
+        centos|rhel|almalinux|rocky|fedora)
+            # Check if epel is needed
+            if ! rpm -q epel-release >/dev/null 2>&1; then
+                if [[ "${OS_ID}" == "centos" ]] || [[ "${OS_ID}" == "rhel" ]]; then
+                    yum install -y epel-release
+                fi
+            fi
+            yum install -y mrtg net-snmp net-snmp-utils \
+                           perl-libwww-perl perl-Crypt-SSLeay \
+                           perl-Digest-HMAC perl-IO-Socket-SSL \
+                           perl-Net-SNMP
             ;;
         *)
             error_exit "Unsupported OS: ${OS}"
@@ -321,400 +363,492 @@ install_dependencies() {
 }
 
 configure_snmp() {
-    log "INFO" "Configuring SNMP..."
+    log "INFO" "Configuring SNMP with custom community string..."
 
-    local community="public"
-    local location="DataCenter"
-    local contact="${DEFAULT_EMAIL}"
+    # Generate random community if not set
+    if [[ -z "${SNMP_COMMUNITY}" ]]; then
+        SNMP_COMMUNITY="mrtg_$(openssl rand -hex 8)"
+        log "INFO" "Generated secure community string: ${SNMP_COMMUNITY}"
+    fi
 
-    # Create SNMP configuration
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would configure SNMP with community: ${SNMP_COMMUNITY}"
+        return 0
+    fi
+
+    # Backup existing config
+    if [[ -f /etc/snmp/snmpd.conf ]]; then
+        cp /etc/snmp/snmpd.conf /etc/snmp/snmpd.conf.backup.$(date +%Y%m%d)
+    fi
+
+    # Create secure SNMP configuration
     cat > /etc/snmp/snmpd.conf << EOF
-# MRTG SNMP Configuration
-# Generated by ${SCRIPT_NAME} on $(date)
+########################################################################
+# SNMPd Configuration for MRTG
+# Generated by MRTG Professional Suite on $(date)
+# Community: ${SNMP_COMMUNITY}
+########################################################################
+
+# Only allow read-only access from localhost with custom community
+rocommunity ${SNMP_COMMUNITY} 127.0.0.1
+rocommunity6 ${SNMP_COMMUNITY} ::1
 
 # System information
-syslocation ${location}
-syscontact ${contact}
-
-# SNMP community string
-rocommunity ${community} 127.0.0.1
-rocommunity ${community} localhost
-rocommunity6 ${community} ::1
+syslocation "Production Server"
+syscontact ${DEFAULT_EMAIL}
 
 # Network interfaces monitoring
 view systemonly included .1.3.6.1.2.1.1
 view systemonly included .1.3.6.1.2.1.2
 view systemonly included .1.3.6.1.2.1.3
-view systemonly included .1.3.6.1.2.1.25.1
 
 # Disk monitoring
 includeAllDisks 10%
 
-# Process monitoring
+# Process monitoring (common services)
 proc httpd 10 5
+proc nginx 10 5
 proc sshd
 proc snmpd
 
 # Load averages
 load 12 10 5
 
-# System memory monitoring
-includeAllDisks 10%
-includeAllDisks 5% /var
+# Memory monitoring
+view systemonly included .1.3.6.1.4.1.2021.4
 
-# Access control
-rocommunity ${community} 10.0.0.0/8
-rocommunity ${community} 172.16.0.0/12
-rocommunity ${community} 192.168.0.0/16
-
-# SNMPv3 user (optional)
-# createUser mrtg-user SHA "password" AES "encryption"
-# rouser mrtg-user
-
-# Include all interfaces
-#view all included .1 80
-#access MyROGroup "" any noauth prefix all none none
+# Disable default community
+com2sec paranoid default public
+group paranoid v1 paranoid
+group paranoid v2c paranoid
+access paranoid "" any noauth exact system none none
 
 EOF
 
-    # Enable and start SNMP
-    if [[ -f /etc/systemd/system/snmpd.service ]]; then
+    # Restart SNMP
+    if systemctl list-units --full -all | grep -Fq 'snmpd.service'; then
         systemctl enable snmpd
         systemctl restart snmpd
     else
         service snmpd restart
     fi
 
-    log "SUCCESS" "SNMP configured successfully"
+    log "SUCCESS" "SNMP configured with secure community string"
 }
 
-create_mrtg_directories() {
+configure_firewall() {
+    log "INFO" "Checking firewall configuration..."
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would configure firewall to allow SNMP (UDP 161)"
+        return 0
+    fi
+
+    # CSF (Common on DirectAdmin/cPanel)
+    if [[ -f /etc/csf/csf.conf ]]; then
+        log "INFO" "CSF Firewall detected"
+
+        # Backup CSF config
+        cp /etc/csf/csf.conf /etc/csf/csf.conf.backup.$(date +%Y%m%d)
+
+        # Add SNMP port if not exists
+        if ! grep -q "161" /etc/csf/csf.conf; then
+            sed -i 's/^UDP_IN = "\(.*\)"/UDP_IN = "\1,161"/' /etc/csf/csf.conf
+            sed -i 's/^UDP_OUT = "\(.*\)"/UDP_OUT = "\1,161"/' /etc/csf/csf.conf
+            csf -r >/dev/null 2>&1
+            log "SUCCESS" "CSF updated to allow SNMP"
+        else
+            log "INFO" "SNMP port already allowed in CSF"
+        fi
+
+    # Firewalld
+    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        log "INFO" "Firewalld detected"
+        firewall-cmd --permanent --add-service=snmp
+        firewall-cmd --reload >/dev/null
+        log "SUCCESS" "Firewalld updated"
+
+    # UFW
+    elif command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
+        log "INFO" "UFW detected"
+        ufw allow snmp
+        log "SUCCESS" "UFW updated"
+
+    # iptables (basic check)
+    elif command -v iptables >/dev/null 2>&1; then
+        log "WARNING" "Manual iptables detected - please ensure UDP port 161 is open"
+    else
+        log "INFO" "No active firewall detected"
+    fi
+}
+
+create_directories() {
     log "INFO" "Creating MRTG directories..."
 
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would create directories: ${MRTG_BASE}, ${MRTG_CONF}, etc"
+        return 0
+    fi
+
     mkdir -p "${MRTG_CONF}"
-    mkdir -p "${MRTG_HTML}"
     mkdir -p "${MRTG_LOG}"
+    mkdir -p "${MRTG_HTML}"
     mkdir -p "${MRTG_BIN}"
-    mkdir -p "${MRTG_BACKUP}"
     mkdir -p "${MRTG_VAR}"
-    mkdir -p "${DEFAULT_HTML_DIR}"
+    mkdir -p "${CONFIG_BACKUP_DIR}"
 
-    # Set permissions
+    # Create web directory if it doesn't exist
+    if [[ ! -d "${WEB_ROOT}/mrtg" ]]; then
+        mkdir -p "${WEB_ROOT}/mrtg"
+    fi
+
+    # Set proper permissions
     chmod 755 "${MRTG_BASE}"
-    chmod 755 "${MRTG_CONF}"
-    chmod 755 "${MRTG_HTML}"
-    chmod 755 "${DEFAULT_HTML_DIR}"
+    chmod 750 "${MRTG_CONF}"
+    chmod 755 "${MRTG_LOG}"
+    chmod 755 "${WEB_ROOT}/mrtg"
 
-    log "SUCCESS" "Directories created successfully"
+    log "SUCCESS" "Directories created"
 }
 
 generate_mrtg_config() {
-    log "INFO" "Generating MRTG configuration..."
+    log "INFO" "Generating MRTG configuration with hardware detection..."
 
-    local interfaces=($(detect_network_interfaces))
     local cfg_file="${MRTG_CONF}/mrtg.cfg"
-    local panel=$(detect_control_panel)
+    local mrtg_path=$(command -v mrtg || echo "/usr/bin/mrtg")
+    local cfgmaker_path=$(command -v cfgmaker || echo "/usr/bin/cfgmaker")
+    local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
 
-    # Create main configuration file
-    cat > "${cfg_file}" << EOF
-########################################################################
-# MRTG Configuration File
-# Generated by ${SCRIPT_NAME} on $(date)
-# Control Panel: ${panel}
-########################################################################
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would generate MRTG config using: ${cfgmaker_path}"
+        return 0
+    fi
 
-# Global configuration
-WorkDir: ${DEFAULT_HTML_DIR}
-RunAsDaemon: No
-Interval: ${INTERVAL:-${DEFAULT_INTERVAL}}
-WriteExpires: Yes
-WithPeak[_]: wmy
-LoadMIBs: /usr/share/snmp/mibs
-Options[_]: growright, bits, nopercent
+    # Use cfgmaker to detect hardware automatically
+    ${cfgmaker_path} \
+        --global "WorkDir: ${WEB_ROOT}/mrtg" \
+        --global "Options[_]: growright, bits, nopercent" \
+        --global "LogDir: ${MRTG_LOG}" \
+        --global "RunAsDaemon: No" \
+        --global "Interval: ${INTERVAL:-${DEFAULT_INTERVAL}}" \
+        --global "EnableIPv6: yes" \
+        --global "Language: english" \
+        --snmp-options=:::::2 \
+        "${SNMP_COMMUNITY}@127.0.0.1" > "${cfg_file}" 2>/dev/null || true
 
-# Logging
-LogDir: ${MRTG_LOG}
-LogFormat: rrdtool
+    # Check if cfgmaker succeeded
+    if [[ ! -s "${cfg_file}" ]]; then
+        log "WARNING" "cfgmaker failed, using template configuration"
+        generate_template_config "${cfg_file}"
+    fi
 
-# HTML formatting
-PageTop[_]: <h1>MRTG Monitoring - Interface Traffic</h1>
-PageFoot[_]: <hr><div align="right">Generated by ${SCRIPT_NAME}</div>
-
-# Language settings
-Language: english
-
-# Enable IPv6
-EnableIPv6: yes
-
-# SNMP settings
-SnmpOptions: noVersion3
-Timeout[*/]: 2
-Retries[*/]: 2
-
-# Global HTML settings
-Title[^]: MRTG Network Monitor
-XSize[_]: 600
-YSize[_]: 300
-
-# Refresh rate
-Refresh: 300
-
-# Multiple interfaces support
-AddHeaders: Expires: Mon, 26 Jul 1997 05:00:00 GMT
-AddHeaders: Pragma: no-cache
-AddHeaders: Cache-control: no-cache
-
-# Icon directory
-IconDir: /mrtg-icons
+    # Append system monitoring
+    cat >> "${cfg_file}" << EOF
 
 ########################################################################
-# Interface Configurations
+# System Health Monitoring
 ########################################################################
+
+# CPU Load
+Target[cpu]: .1.3.6.1.4.1.2021.11.9.0&.1.3.6.1.4.1.2021.11.10.0:${SNMP_COMMUNITY}@127.0.0.1:
+Title[cpu]: CPU Load Average
+PageTop[cpu]: <h1>System CPU Load</h1>
+MaxBytes[cpu]: 100
+ShortLegend[cpu]: %
+YLegend[cpu]: CPU Load (%)
+Legend1[cpu]: 1 Minute Load
+Legend2[cpu]: 5 Minute Load
+Options[cpu]: growright, nopercent, noinfo
+
+# Memory Usage
+Target[mem]: .1.3.6.1.4.1.2021.4.5.0&.1.3.6.1.4.1.2021.4.6.0:${SNMP_COMMUNITY}@127.0.0.1:
+Title[mem]: Memory Usage
+PageTop[mem]: <h1>System Memory Usage</h1>
+MaxBytes[mem]: 100
+ShortLegend[mem]: %
+YLegend[mem]: Memory (%)
+Options[mem]: growright, nopercent
+
+# Disk Usage - Root
+Target[disk_root]: .1.3.6.1.4.1.2021.9.1.6.1&.1.3.6.1.4.1.2021.9.1.7.1:${SNMP_COMMUNITY}@127.0.0.1:
+Title[disk_root]: Disk Usage - Root Partition
+PageTop[disk_root]: <h1>Root Partition Usage</h1>
+MaxBytes[disk_root]: 100
+ShortLegend[disk_root]: %
+YLegend[disk_root]: Disk Usage (%)
+Options[disk_root]: growright, nopercent
 
 EOF
 
-    # Add configuration for each interface
+    log "SUCCESS" "MRTG configuration generated"
+}
+
+generate_template_config() {
+    local cfg_file="$1"
+    local interfaces=($(detect_network_interfaces))
+
+    log "INFO" "Creating template configuration for ${#interfaces[@]} interfaces"
+
+    cat > "${cfg_file}" << EOF
+########################################################################
+# MRTG Template Configuration
+# Generated by MRTG Professional Suite on $(date)
+########################################################################
+
+# Global settings
+WorkDir: ${WEB_ROOT}/mrtg
+LogDir: ${MRTG_LOG}
+Interval: ${INTERVAL:-${DEFAULT_INTERVAL}}
+Options[_]: growright, bits
+EnableIPv6: yes
+Language: english
+
+EOF
+
+    # Add each interface
     for interface in "${interfaces[@]}"; do
+        # Try to detect interface speed
+        local speed=1000000  # Default 1Gbps
+        if [[ -f "/sys/class/net/${interface}/speed" ]]; then
+            local detected_speed=$(cat "/sys/class/net/${interface}/speed" 2>/dev/null || echo "1000")
+            speed=$((detected_speed * 1000000 / 8))  # Convert to bytes
+        fi
+
         cat >> "${cfg_file}" << EOF
 # Interface: ${interface}
-Target[${interface}]: /${interface}:public@127.0.0.1:::::2
-MaxBytes[${interface}]: 1250000
+Target[${interface}]: ${interface}:${SNMP_COMMUNITY}@127.0.0.1:
+MaxBytes[${interface}]: ${speed}
 Title[${interface}]: Traffic Analysis for ${interface}
 PageTop[${interface}]: <h1>Traffic Analysis for ${interface}</h1>
-Options[${interface}]: growright, bits, nopercent
 YLegend[${interface}]: Bits per second
 ShortLegend[${interface}]: b/s
 Legend1[${interface}]: Incoming Traffic (bits/sec)
 Legend2[${interface}]: Outgoing Traffic (bits/sec)
-Legend3[${interface}]: Max Incoming (bits/sec)
-Legend4[${interface}]: Max Outgoing (bits/sec)
-LegendI[${interface}]: In:
-LegendO[${interface}]: Out:
 WithPeak[${interface}]: wmy
 
 EOF
     done
-
-    # Add CPU monitoring if SNMP supports it
-    cat >> "${cfg_file}" << EOF
-########################################################################
-# CPU Monitoring
-########################################################################
-
-Target[cpu]: .1.3.6.1.4.1.2021.11.9.0&.1.3.6.1.4.1.2021.11.10.0:public@127.0.0.1:
-Title[cpu]: CPU Load Average
-PageTop[cpu]: <h1>System CPU Load</h1>
-MaxBytes[cpu]: 100
-YLegend[cpu]: CPU Load (%)
-ShortLegend[cpu]: %
-Legend1[cpu]: 1 Minute Load
-Legend2[cpu]: 5 Minute Load
-Legend3[cpu]: 15 Minute Load
-Options[cpu]: growright, nopercent, noinfo
-
-########################################################################
-# Memory Monitoring
-########################################################################
-
-Target[mem]: .1.3.6.1.4.1.2021.4.5.0&.1.3.6.1.4.1.2021.4.6.0:public@127.0.0.1:
-Title[mem]: Memory Usage
-PageTop[mem]: <h1>System Memory Usage</h1>
-MaxBytes[mem]: 100
-YLegend[mem]: Memory (%)
-ShortLegend[mem]: %
-Legend1[mem]: Total Memory
-Legend2[mem]: Used Memory
-Options[mem]: growright, nopercent
-
-########################################################################
-# Disk Usage Monitoring
-########################################################################
-
-Target[disk]: .1.3.6.1.4.1.2021.9.1.6.1&.1.3.6.1.4.1.2021.9.1.7.1:public@127.0.0.1:
-Title[disk]: Disk Usage - Root Partition
-PageTop[disk]: <h1>Root Partition Usage</h1>
-MaxBytes[disk]: 100
-YLegend[disk]: Disk Usage (%)
-ShortLegend[disk]: %
-Legend1[disk]: Used Space
-Legend2[disk]: Available Space
-Options[disk]: growright, nopercent
-
-EOF
-
-    log "SUCCESS" "MRTG configuration generated successfully"
 }
 
-configure_directadmin() {
-    local panel=$(detect_control_panel)
+setup_cron() {
+    local interval="${INTERVAL:-${DEFAULT_INTERVAL}}"
 
-    if [[ "${panel}" != "directadmin" ]]; then
+    log "INFO" "Setting up cron with ${interval} minute interval..."
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would add cron job: */${interval} * * * * ${MRTG_BIN}/run-mrtg.sh"
         return 0
     fi
 
-    log "INFO" "Configuring DirectAdmin integration..."
+    # Create runner script
+    cat > "${MRTG_BIN}/run-mrtg.sh" << EOF
+#!/bin/bash
+# MRTG Runner Script
+# Generated on $(date)
 
-    # Create DirectAdmin plugin structure
-    local da_plugins="/usr/local/directadmin/plugins"
-    local mrtg_plugin="${da_plugins}/mrtg-monitor"
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-    mkdir -p "${mrtg_plugin}/admin"
-    mkdir -p "${mrtg_plugin}/data"
-    mkdir -p "${mrtg_plugin}/hooks"
-    mkdir -p "${mrtg_plugin}/scripts"
+# Run MRTG (ignore first-run errors)
+/usr/bin/mrtg ${MRTG_CONF}/mrtg.cfg --logging ${MRTG_LOG}/mrtg.log 2>/dev/null || true
+/usr/bin/mrtg ${MRTG_CONF}/mrtg.cfg --logging ${MRTG_LOG}/mrtg.log 2>/dev/null || true
+/usr/bin/mrtg ${MRTG_CONF}/mrtg.cfg --logging ${MRTG_LOG}/mrtg.log
 
-    # Create plugin configuration
-    cat > "${mrtg_plugin}/plugin.conf" << EOF
-name=MRTG Monitor
-version=1.0
+# Generate index
+/usr/bin/indexmaker ${MRTG_CONF}/mrtg.cfg --output=${WEB_ROOT}/mrtg/index.html
+
+# Set permissions
+chown -R ${WEB_USER}:${WEB_GROUP} ${WEB_ROOT}/mrtg 2>/dev/null || true
+chmod -R 755 ${WEB_ROOT}/mrtg 2>/dev/null || true
+EOF
+
+    chmod +x "${MRTG_BIN}/run-mrtg.sh"
+
+    # Remove existing MRTG cron entries
+    crontab -l 2>/dev/null | grep -v "mrtg" | crontab -
+
+    # Add new cron job with comment for easy identification
+    (crontab -l 2>/dev/null; echo "# MRTG Monitoring - Added by MRTG Professional Suite") | crontab -
+    (crontab -l 2>/dev/null; echo "*/${interval} * * * * ${MRTG_BIN}/run-mrtg.sh >/dev/null 2>&1") | crontab -
+
+    log "SUCCESS" "Cron job added"
+}
+
+setup_web_access() {
+    log "INFO" "Setting up web access for existing web server..."
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would configure web access for: ${WEB_SERVER}"
+        return 0
+    fi
+
+    # Create symbolic link if needed
+    if [[ "${WEB_ROOT}/mrtg" != "${MRTG_HTML}" ]]; then
+        ln -sf "${WEB_ROOT}/mrtg" "${MRTG_HTML}"
+    fi
+
+    # Create .htaccess for Apache/LiteSpeed
+    if [[ "${WEB_SERVER}" == "apache" ]] || [[ "${WEB_SERVER}" == "litespeed" ]]; then
+        cat > "${WEB_ROOT}/mrtg/.htaccess" << EOF
+# MRTG Access Control
+Order Deny,Allow
+Deny from all
+Allow from 127.0.0.1
+Allow from ::1
+# Allow from 192.168.0.0/16  # Uncomment for local network
+# Allow from 10.0.0.0/8       # Uncomment for private network
+EOF
+    fi
+
+    # Create robots.txt
+    cat > "${WEB_ROOT}/mrtg/robots.txt" << EOF
+User-agent: *
+Disallow: /
+EOF
+
+    # Set proper permissions
+    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_ROOT}/mrtg" 2>/dev/null || true
+    chmod -R 755 "${WEB_ROOT}/mrtg" 2>/dev/null || true
+
+    log "SUCCESS" "Web access configured for ${WEB_SERVER}"
+}
+
+configure_panel_integration() {
+    local panel=$(detect_control_panel)
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would configure integration for: ${panel}"
+        return 0
+    fi
+
+    case "${panel}" in
+        "directadmin")
+            log "INFO" "Setting up DirectAdmin integration..."
+            local da_plugins="/usr/local/directadmin/plugins"
+            local mrtg_plugin="${da_plugins}/mrtg-monitor"
+
+            mkdir -p "${mrtg_plugin}/admin"
+            mkdir -p "${mrtg_plugin}/data"
+
+            # Create plugin configuration
+            cat > "${mrtg_plugin}/plugin.conf" << EOF
+name=MRTG Network Monitor
+version=1.2
 desc=Network traffic monitoring and bandwidth graphing
-url=/plugins/mrtg-monitor/admin/index.html
-icon=/plugins/mrtg-monitor/icon.png
+url=/plugins/mrtg-monitor/admin/
+icon=graph
 level=admin
 EOF
 
-    # Create admin index page
-    cat > "${mrtg_plugin}/admin/index.html" << EOF
+            # Create admin page
+            cat > "${mrtg_plugin}/admin/index.html" << EOF
 <!DOCTYPE html>
 <html>
 <head>
     <title>MRTG Network Monitor</title>
     <meta http-equiv="refresh" content="300">
-    <link rel="stylesheet" href="/plugins/mrtg-monitor/css/style.css">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .header { background: #f0f0f0; padding: 10px; margin-bottom: 20px; }
+        .graph-container { margin: 20px 0; }
+    </style>
 </head>
 <body>
     <div class="header">
         <h1>Network Traffic Monitoring</h1>
-        <p>DirectAdmin Integration by ${SCRIPT_AUTHOR}</p>
+        <p>DirectAdmin Integration by Wael Isa</p>
     </div>
-    <div class="content">
+    <div class="graph-container">
         <iframe src="/mrtg/" width="100%" height="1000" frameborder="0"></iframe>
     </div>
 </body>
 </html>
 EOF
 
-    # Create symbolic link to MRTG HTML directory
-    ln -sf "${DEFAULT_HTML_DIR}" "/var/www/html/mrtg"
+            # Set proper ownership
+            chown -R diradmin:diradmin "${mrtg_plugin}" 2>/dev/null || true
+            log "SUCCESS" "DirectAdmin integration configured"
+            ;;
 
-    log "SUCCESS" "DirectAdmin integration configured"
+        "cpanel")
+            log "INFO" "cPanel detected - creating symlink in cpanel's webroot"
+            if [[ -d "/usr/local/apache/htdocs" ]]; then
+                ln -sf "${WEB_ROOT}/mrtg" "/usr/local/apache/htdocs/mrtg"
+            fi
+            log "SUCCESS" "cPanel integration configured"
+            ;;
+
+        "plesk")
+            log "INFO" "Plesk detected - adding to vhosts"
+            # Plesk usually uses /var/www/vhosts/domain.com/httpdocs
+            # We'll create a symlink in the default domain
+            if [[ -d "/var/www/vhosts/default/htdocs" ]]; then
+                ln -sf "${WEB_ROOT}/mrtg" "/var/www/vhosts/default/htdocs/mrtg"
+            fi
+            log "SUCCESS" "Plesk integration configured"
+            ;;
+    esac
 }
 
-setup_cron() {
-    local interval="${INTERVAL:-${DEFAULT_INTERVAL}}"
+# =============================================================================
+# INITIALIZATION FUNCTIONS
+# =============================================================================
 
-    log "INFO" "Setting up cron job with ${interval} minute interval..."
+initialize_mrtg() {
+    log "INFO" "Running initial MRTG collection (3-pass warmup)..."
 
-    # Create MRTG runner script
-    cat > "${MRTG_BIN}/run-mrtg.sh" << EOF
-#!/bin/bash
-# MRTG Runner Script
-# Generated by ${SCRIPT_NAME} on $(date)
-
-export LANG=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
-
-# Run MRTG
-/usr/bin/mrtg ${MRTG_CONF}/mrtg.cfg --logging ${MRTG_LOG}/mrtg.log
-
-# Generate index page
-/usr/bin/indexmaker ${MRTG_CONF}/mrtg.cfg --output=${DEFAULT_HTML_DIR}/index.html
-
-# Set permissions
-chmod -R 644 ${DEFAULT_HTML_DIR}/*
-chmod -R 755 ${DEFAULT_HTML_DIR}
-EOF
-
-    chmod +x "${MRTG_BIN}/run-mrtg.sh"
-
-    # Add to crontab
-    local cron_cmd="*/${interval} * * * * ${MRTG_BIN}/run-mrtg.sh >/dev/null 2>&1"
-
-    # Check if already in crontab
-    if crontab -l 2>/dev/null | grep -q "${MRTG_BIN}/run-mrtg.sh"; then
-        log "WARNING" "Cron job already exists. Removing old one..."
-        crontab -l | grep -v "${MRTG_BIN}/run-mrtg.sh" | crontab -
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would run MRTG 3 times to initialize data"
+        return 0
     fi
 
-    # Add new cron job
-    (crontab -l 2>/dev/null; echo "${cron_cmd}") | crontab -
+    local mrtg_path=$(command -v mrtg || echo "/usr/bin/mrtg")
+    local cfg_file="${MRTG_CONF}/mrtg.cfg"
 
-    log "SUCCESS" "Cron job added successfully (interval: ${interval} minutes)"
+    # Run MRTG 3 times (required for first-time setup)
+    for i in {1..3}; do
+        log "INFO" "MRTG pass ${i}/3..."
+        env LANG=C ${mrtg_path} "${cfg_file}" --logging "${MRTG_LOG}/mrtg.log" >/dev/null 2>&1 || true
+    done
+
+    # Generate index page
+    local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
+    ${indexmaker_path} "${cfg_file}" --output="${WEB_ROOT}/mrtg/index.html"
+
+    # Set permissions
+    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_ROOT}/mrtg" 2>/dev/null || true
+    chmod -R 755 "${WEB_ROOT}/mrtg" 2>/dev/null || true
+
+    log "SUCCESS" "Initial MRTG data collection complete"
 }
 
-setup_web_interface() {
-    log "INFO" "Setting up web interface..."
+# =============================================================================
+# BACKUP FUNCTIONS
+# =============================================================================
 
-    # Create .htaccess for security
-    cat > "${DEFAULT_HTML_DIR}/.htaccess" << EOF
-# MRTG Web Access Control
-# Generated by ${SCRIPT_NAME} on $(date)
+backup_config() {
+    local backup_file="${CONFIG_BACKUP_DIR}/mrtg-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
 
-# Allow access from localhost only by default
-Order Deny,Allow
-Deny from all
-Allow from 127.0.0.1
-Allow from ::1
+    log "INFO" "Creating backup: ${backup_file}"
 
-# Uncomment to allow specific IP ranges
-# Allow from 192.168.1.
-# Allow from 10.0.0.
-
-# Password protect if desired
-# AuthType Basic
-# AuthName "MRTG Monitoring"
-# AuthUserFile /etc/mrtg/.htpasswd
-# Require valid-user
-EOF
-
-    # Create robots.txt
-    cat > "${DEFAULT_HTML_DIR}/robots.txt" << EOF
-User-agent: *
-Disallow: /
-EOF
-
-    log "SUCCESS" "Web interface configured"
-}
-
-configure_email_alerts() {
-    local email="${1:-${DEFAULT_EMAIL}}"
-
-    log "INFO" "Configuring email alerts for ${email}..."
-
-    # Create alert configuration
-    cat > "${MRTG_CONF}/alerts.cfg" << EOF
-#!/bin/bash
-# MRTG Email Alert Configuration
-# Generated by ${SCRIPT_NAME} on $(date)
-
-# Email settings
-ALERT_EMAIL="${email}"
-SMTP_SERVER="localhost"
-SMTP_PORT="25"
-
-# Thresholds (in bits per second)
-WARN_THRESHOLD="1000000"  # 1 Mbps
-CRIT_THRESHOLD="10000000" # 10 Mbps
-
-# Check function
-check_bandwidth() {
-    local interface="\$1"
-    local current=\$2
-    local max=\$3
-
-    if [[ \${current} -gt ${CRIT_THRESHOLD} ]]; then
-        echo "CRITICAL: Interface \${interface} is at \${current} bps" | \\
-            mail -s "MRTG Critical Alert - \${interface}" "\${ALERT_EMAIL}"
-    elif [[ \${current} -gt ${WARN_THRESHOLD} ]]; then
-        echo "WARNING: Interface \${interface} is at \${current} bps" | \\
-            mail -s "MRTG Warning Alert - \${interface}" "\${ALERT_EMAIL}"
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would backup configuration to: ${backup_file}"
+        return 0
     fi
-}
-EOF
 
-    chmod +x "${MRTG_CONF}/alerts.cfg"
+    tar -czf "${backup_file}" \
+        --exclude="${MRTG_LOG}/*" \
+        --exclude="${MRTG_VAR}/*" \
+        "${MRTG_CONF}" 2>/dev/null || true
 
-    log "SUCCESS" "Email alerts configured"
+    # Backup SNMP config
+    if [[ -f /etc/snmp/snmpd.conf ]]; then
+        cp /etc/snmp/snmpd.conf "${CONFIG_BACKUP_DIR}/snmpd.conf.backup.$(date +%Y%m%d)"
+    fi
+
+    log "SUCCESS" "Backup created: ${backup_file}"
+    echo -e "${GREEN}Backup saved to: ${backup_file}${NC}"
 }
 
 # =============================================================================
@@ -722,131 +856,56 @@ EOF
 # =============================================================================
 
 uninstall_mrtg() {
-    local force="${1:-false}"
-
     log "INFO" "Starting uninstallation process..."
 
-    if [[ "${force}" != "true" ]]; then
-        echo -e "${YELLOW}WARNING: This will completely remove MRTG and all configurations.${NC}"
-        read -p "Are you sure you want to continue? (y/N): " confirm
-        if [[ ! "${confirm}" =~ ^[Yy]$ ]]; then
-            log "INFO" "Uninstallation cancelled"
-            return 0
-        fi
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would perform complete uninstall"
+        return 0
     fi
+
+    # Confirm uninstall
+    if ! confirm_action "Are you sure you want to completely uninstall MRTG?"; then
+        log "INFO" "Uninstall cancelled"
+        return 0
+    fi
+
+    # Create backup before uninstall
+    backup_config
 
     # Remove cron jobs
     log "INFO" "Removing cron jobs..."
-    crontab -l 2>/dev/null | grep -v "${MRTG_BIN}/run-mrtg.sh" | crontab -
+    crontab -l 2>/dev/null | grep -v "mrtg" | crontab -
 
-    # Stop services
-    log "INFO" "Stopping services..."
-    systemctl stop snmpd 2>/dev/null || service snmpd stop 2>/dev/null || true
-
-    # Remove packages (ask user)
-    echo -e "${YELLOW}Do you want to remove MRTG and SNMP packages?${NC}"
-    read -p "Remove packages? (y/N): " remove_pkgs
-
-    if [[ "${remove_pkgs}" =~ ^[Yy]$ ]]; then
+    # Ask about removing packages
+    if confirm_action "Do you want to remove MRTG and SNMP packages?"; then
         log "INFO" "Removing packages..."
-        case "${OS}" in
-            *"Ubuntu"*|*"Debian"*)
+        case "${OS_ID}" in
+            ubuntu|debian)
                 apt-get remove --purge -y mrtg snmpd snmp
                 ;;
-            *"CentOS"*|*"Red Hat"*|*"Fedora"*|*"AlmaLinux"*|*"Rocky"*)
+            centos|rhel|almalinux|rocky|fedora)
                 yum remove -y mrtg net-snmp net-snmp-utils
                 ;;
         esac
     fi
 
-    # Remove MRTG directories
-    log "INFO" "Removing MRTG files..."
-    read -p "Remove all MRTG data and configurations? (y/N): " remove_data
-
-    if [[ "${remove_data}" =~ ^[Yy]$ ]]; then
+    # Ask about removing data
+    if confirm_action "Do you want to remove all MRTG data and configurations?"; then
+        log "INFO" "Removing MRTG files..."
         rm -rf "${MRTG_BASE}"
         rm -rf "${MRTG_VAR}"
-        rm -rf "${DEFAULT_HTML_DIR}"
+        rm -rf "${WEB_ROOT}/mrtg"
+        rm -rf "/usr/local/directadmin/plugins/mrtg-monitor" 2>/dev/null || true
         log "INFO" "All MRTG data removed"
     fi
 
-    # Remove DirectAdmin plugin
-    if [[ -d "/usr/local/directadmin/plugins/mrtg-monitor" ]]; then
-        rm -rf "/usr/local/directadmin/plugins/mrtg-monitor"
-        log "INFO" "DirectAdmin plugin removed"
+    # Restore original SNMP config if exists
+    if [[ -f /etc/snmp/snmpd.conf.backup.* ]] && confirm_action "Restore original SNMP configuration?"; then
+        cp /etc/snmp/snmpd.conf.backup.* /etc/snmp/snmpd.conf
+        systemctl restart snmpd
     fi
 
-    log "SUCCESS" "Uninstallation completed"
-}
-
-# =============================================================================
-# BACKUP AND RESTORE FUNCTIONS
-# =============================================================================
-
-backup_config() {
-    local backup_file="${MRTG_BACKUP}/mrtg-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-
-    log "INFO" "Creating backup: ${backup_file}"
-
-    # Create backup
-    tar -czf "${backup_file}" \
-        --exclude="${MRTG_LOG}/*" \
-        --exclude="${MRTG_VAR}/*" \
-        "${MRTG_CONF}" \
-        "${MRTG_HTML}" \
-        "${MRTG_BIN}" \
-        "${DEFAULT_HTML_DIR}" \
-        /etc/snmp/snmpd.conf \
-        2>/dev/null || true
-
-    if [[ -f "${backup_file}" ]]; then
-        log "SUCCESS" "Backup created: ${backup_file}"
-        echo -e "${GREEN}Backup saved to: ${backup_file}${NC}"
-    else
-        log "ERROR" "Backup failed"
-        return 1
-    fi
-}
-
-restore_config() {
-    log "INFO" "Available backups:"
-    local backups=($(ls -1 "${MRTG_BACKUP}"/*.tar.gz 2>/dev/null))
-
-    if [[ ${#backups[@]} -eq 0 ]]; then
-        log "ERROR" "No backups found"
-        return 1
-    fi
-
-    local i=1
-    for backup in "${backups[@]}"; do
-        echo -e "  ${CYAN}${i})${NC} $(basename "${backup}")"
-        i=$((i+1))
-    done
-
-    read -p "Select backup to restore (1-${#backups[@]}): " selection
-
-    if [[ ! "${selection}" =~ ^[0-9]+$ ]] || [[ "${selection}" -lt 1 ]] || [[ "${selection}" -gt ${#backups[@]} ]]; then
-        log "ERROR" "Invalid selection"
-        return 1
-    fi
-
-    local selected="${backups[$((selection-1))]}"
-
-    log "INFO" "Restoring from: ${selected}"
-
-    # Stop MRTG cron temporarily
-    crontab -l 2>/dev/null | grep -v "${MRTG_BIN}/run-mrtg.sh" | crontab -
-
-    # Restore files
-    tar -xzf "${selected}" -C /
-
-    # Restart services
-    systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
-
-    # Re-add cron
-    setup_cron
-
-    log "SUCCESS" "Restore completed"
+    log "SUCCESS" "Uninstall completed"
 }
 
 # =============================================================================
@@ -854,8 +913,6 @@ restore_config() {
 # =============================================================================
 
 check_status() {
-    log "INFO" "Checking MRTG status..."
-
     echo -e "\n${BOLD}=== MRTG Installation Status ===${NC}\n"
 
     # Check if installed
@@ -866,25 +923,29 @@ check_status() {
     fi
 
     # Check services
-    if systemctl status snmpd 2>/dev/null | grep -q "active (running)"; then
-        echo -e "  ${GREEN}✓${NC} SNMP service running"
-    elif service snmpd status 2>/dev/null | grep -q "running"; then
+    if systemctl is-active --quiet snmpd 2>/dev/null || service snmpd status 2>/dev/null | grep -q "running"; then
         echo -e "  ${GREEN}✓${NC} SNMP service running"
     else
         echo -e "  ${RED}✗${NC} SNMP service not running"
     fi
 
+    # Check web server
+    echo -e "  ${GREEN}✓${NC} Web server: ${WEB_SERVER} (user: ${WEB_USER})"
+
     # Check cron
-    if crontab -l 2>/dev/null | grep -q "${MRTG_BIN}/run-mrtg.sh"; then
-        local interval=$(crontab -l 2>/dev/null | grep "${MRTG_BIN}/run-mrtg.sh" | awk '{print $2}')
+    if crontab -l 2>/dev/null | grep -q "mrtg"; then
+        local interval=$(crontab -l | grep "mrtg" | grep -v "^#" | awk '{print $2}')
         echo -e "  ${GREEN}✓${NC} Cron job active (interval: ${interval} minutes)"
     else
         echo -e "  ${RED}✗${NC} No cron job found"
     fi
 
     # Check web interface
-    if [[ -f "${DEFAULT_HTML_DIR}/index.html" ]]; then
-        echo -e "  ${GREEN}✓${NC} Web interface accessible at: ${DEFAULT_HTML_DIR}"
+    if [[ -f "${WEB_ROOT}/mrtg/index.html" ]]; then
+        echo -e "  ${GREEN}✓${NC} Web interface accessible at: ${WEB_ROOT}/mrtg/"
+        # Try to get server IP
+        local server_ip=$(ip route get 1 | awk '{print $NF;exit}' 2>/dev/null || echo "your-server")
+        echo -e "  ${CYAN}   URL: http://${server_ip}/mrtg/${NC}"
     else
         echo -e "  ${RED}✗${NC} Web interface not generated yet"
     fi
@@ -893,21 +954,17 @@ check_status() {
     local interfaces=($(detect_network_interfaces))
     echo -e "\n${BOLD}=== Monitored Interfaces (${#interfaces[@]}) ===${NC}\n"
     for interface in "${interfaces[@]}"; do
-        if [[ -f "${DEFAULT_HTML_DIR}/${interface}.html" ]]; then
+        if [[ -f "${WEB_ROOT}/mrtg/${interface}.html" ]]; then
             echo -e "  ${GREEN}✓${NC} ${interface} - monitoring active"
         else
-            echo -e "  ${YELLOW}○${NC} ${interface} - waiting for first run"
+            echo -e "  ${YELLOW}○${NC} ${interface} - waiting for data"
         fi
     done
 
-    # Check disk space
-    echo -e "\n${BOLD}=== Disk Usage ===${NC}\n"
-    du -sh "${MRTG_BASE}" 2>/dev/null || echo "  No data yet"
-
     # Last run time
-    echo -e "\n${BOLD}=== Last Activity ===${NC}\n"
     if [[ -f "${MRTG_LOG}/mrtg.log" ]]; then
-        echo -e "  Last log entry: $(tail -1 "${MRTG_LOG}/mrtg.log")"
+        echo -e "\n${BOLD}=== Last Activity ===${NC}\n"
+        echo -e "  Last log entry: $(tail -1 "${MRTG_LOG}/mrtg.log" | cut -c1-80)"
     fi
     echo ""
 }
@@ -917,106 +974,106 @@ check_status() {
 # =============================================================================
 
 installation_wizard() {
-    print_banner
+    clear
+    cat << "EOF"
+================================================================================
+██╗    ██╗ █████╗ ███████╗██╗         ██╗███████╗ █████╗
+██║    ██║██╔══██╗██╔════╝██║         ██║██╔════╝██╔══██╗
+██║ █╗ ██║███████║█████╗  ██║         ██║███████╗███████║
+██║███╗██║██╔══██║██╔══╝  ██║         ██║╚════██║██╔══██║
+╚███╔███╔╝██║  ██║███████╗███████╗    ██║███████╗██║  ██║
+ ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝    ╚═╝╚══════╝╚═╝  ╚═╝
+================================================================================
+    ${BOLD}Professional Monitoring Suite${NC}
+    Version: ${SCRIPT_VERSION} | Author: ${SCRIPT_AUTHOR}
+    GitHub: ${SCRIPT_URL}
+================================================================================
+EOF
 
-    echo -e "${BOLD}Welcome to MRTG Installation Wizard${NC}"
-    echo -e "${CYAN}====================================${NC}\n"
+    echo -e "\n${YELLOW}This installer will NOT modify your web server configuration${NC}"
+    echo -e "${YELLOW}It will detect and use your existing setup${NC}\n"
 
     # Check root
     check_root
 
-    # Detect OS
+    # Detect OS and web server
     detect_os
-    echo -e "Detected OS: ${GREEN}${OS} ${VER}${NC}"
+    detect_web_server || error_exit "Web server detection failed"
 
-    # Detect control panel
+    # Show detected configuration
+    echo -e "\n${BOLD}Detected System Configuration:${NC}"
+    echo -e "  OS: ${GREEN}${OS} ${VER}${NC}"
+    echo -e "  Web Server: ${GREEN}${WEB_SERVER}${NC}"
+    echo -e "  Web User: ${GREEN}${WEB_USER}${NC}"
+    echo -e "  Web Root: ${GREEN}${WEB_ROOT}${NC}"
+
     local panel=$(detect_control_panel)
     if [[ "${panel}" != "none" ]]; then
-        echo -e "Detected Control Panel: ${GREEN}${panel}${NC}"
-    else
-        echo -e "Detected Control Panel: ${YELLOW}none${NC}"
+        echo -e "  Control Panel: ${GREEN}${panel}${NC}"
     fi
 
-    echo ""
-
     # Get installation parameters
+    echo -e "\n${BOLD}Configuration Options:${NC}"
     read -p "Monitoring interval in minutes [${DEFAULT_INTERVAL}]: " interval
     interval=${interval:-${DEFAULT_INTERVAL}}
 
-    read -p "HTML output directory [${DEFAULT_HTML_DIR}]: " html_dir
-    html_dir=${html_dir:-${DEFAULT_HTML_DIR}}
+    read -p "SNMP Community String [auto-generate]: " snmp_community
+    SNMP_COMMUNITY=${snmp_community}
 
     read -p "Notification email [${DEFAULT_EMAIL}]: " email
-    email=${email:-${DEFAULT_EMAIL}}
-
-    # Ask about SNMP configuration
-    echo ""
-    read -p "Configure SNMP with default settings? (Y/n): " configure_snmp_yn
-    configure_snmp_yn=${configure_snmp_yn:-Y}
-
-    # Ask about web interface
-    read -p "Set up web interface with access restrictions? (Y/n): " web_interface_yn
-    web_interface_yn=${web_interface_yn:-Y}
+    DEFAULT_EMAIL=${email:-${DEFAULT_EMAIL}}
 
     # Confirm installation
     echo -e "\n${YELLOW}Installation Summary:${NC}"
     echo "  Interval: ${interval} minutes"
-    echo "  HTML Directory: ${html_dir}"
-    echo "  Email: ${email}"
-    echo "  Configure SNMP: ${configure_snmp_yn}"
-    echo "  Web Interface: ${web_interface_yn}"
+    echo "  SNMP Community: ${SNMP_COMMUNITY:-"<auto-generated>"}"
+    echo "  Email: ${DEFAULT_EMAIL}"
+    echo "  Web Directory: ${WEB_ROOT}/mrtg"
     echo ""
 
-    read -p "Proceed with installation? (y/N): " confirm
-    if [[ ! "${confirm}" =~ ^[Yy]$ ]]; then
+    if ! confirm_action "Proceed with installation?"; then
         log "INFO" "Installation cancelled"
         return 0
     fi
 
-    # Perform installation
-    echo -e "\n${CYAN}Starting installation...${NC}\n"
-
-    # Set variables
+    # Set interval
     INTERVAL=${interval}
-    DEFAULT_HTML_DIR=${html_dir}
-    DEFAULT_EMAIL=${email}
 
-    # Run installation steps
+    # Perform installation
+    log "INFO" "Starting installation..."
+
     install_dependencies
-    create_mrtg_directories
-
-    if [[ "${configure_snmp_yn}" =~ ^[Yy]$ ]]; then
-        configure_snmp
-    fi
-
+    create_directories
+    configure_snmp
+    configure_firewall
     generate_mrtg_config
-    configure_directadmin
-
-    if [[ "${web_interface_yn}" =~ ^[Yy]$ ]]; then
-        setup_web_interface
-    fi
-
-    configure_email_alerts "${email}"
+    setup_web_access
+    configure_panel_integration
     setup_cron
+    initialize_mrtg
 
-    # Initial run
-    log "INFO" "Running initial MRTG collection..."
-    env LANG=C /usr/bin/mrtg "${MRTG_CONF}/mrtg.cfg" --logging "${MRTG_LOG}/mrtg.log" 2>/dev/null || true
-    /usr/bin/mrtg "${MRTG_CONF}/mrtg.cfg" --logging "${MRTG_LOG}/mrtg.log" 2>/dev/null || true
-    /usr/bin/mrtg "${MRTG_CONF}/mrtg.cfg" --logging "${MRTG_LOG}/mrtg.log"
+    # Save configuration for uninstall
+    cat > "${MRTG_CONF}/install.conf" << EOF
+# MRTG Installation Configuration
+WEB_ROOT="${WEB_ROOT}"
+WEB_USER="${WEB_USER}"
+WEB_GROUP="${WEB_GROUP}"
+SNMP_COMMUNITY="${SNMP_COMMUNITY}"
+INSTALL_DATE="$(date)"
+EOF
 
-    # Generate index
-    /usr/bin/indexmaker "${MRTG_CONF}/mrtg.cfg" --output="${DEFAULT_HTML_DIR}/index.html"
+    log "SUCCESS" "Installation completed successfully!"
 
-    # Final message
+    # Show next steps
     echo -e "\n${GREEN}========================================${NC}"
-    echo -e "${GREEN}Installation completed successfully!${NC}"
+    echo -e "${GREEN}Installation Complete!${NC}"
     echo -e "${GREEN}========================================${NC}\n"
 
-    echo -e "Access MRTG at: ${BLUE}http://your-server/mrtg/${NC}"
+    echo -e "Access MRTG at: ${BLUE}http://$(ip route get 1 | awk '{print $NF;exit}' 2>/dev/null || echo "your-server")/mrtg/${NC}"
     echo -e "Configuration: ${CYAN}${MRTG_CONF}/mrtg.cfg${NC}"
+    echo -e "SNMP Community: ${YELLOW}${SNMP_COMMUNITY}${NC} ${RED}(keep this secure!)${NC}"
     echo -e "Logs: ${CYAN}${MRTG_LOG}${NC}"
-    echo -e "Cron interval: ${interval} minutes\n"
+    echo -e "\nTo uninstall: ${CYAN}$0 --uninstall${NC}\n"
 
     check_status
 }
@@ -1026,69 +1083,69 @@ installation_wizard() {
 # =============================================================================
 
 show_menu() {
-    print_banner
-
-    echo -e "${BOLD}MAIN MENU${NC}"
-    echo -e "${CYAN}==========${NC}\n"
+    clear
+    cat << "EOF"
+================================================================================
+    MRTG Professional Monitoring Suite - Enterprise Edition
+================================================================================
+EOF
+    echo -e "\n${BOLD}MAIN MENU${NC}\n"
 
     echo -e "  ${GREEN}1)${NC} Install MRTG (Full installation wizard)"
     echo -e "  ${GREEN}2)${NC} Uninstall MRTG"
-    echo -e "  ${GREEN}3)${NC} Add Cron Job"
+    echo -e "  ${GREEN}3)${NC} Add/Update Cron Job"
     echo -e "  ${GREEN}4)${NC} Remove Cron Job"
-    echo -e "  ${GREEN}5)${NC} Reconfigure MRTG"
-    echo -e "  ${GREEN}6)${NC} Backup Configuration"
-    echo -e "  ${GREEN}7)${NC} Restore Configuration"
-    echo -e "  ${GREEN}8)${NC} Check Status"
-    echo -e "  ${GREEN}9)${NC} View Logs"
-    echo -e "  ${GREEN}10)${NC} Test MRTG Configuration"
-    echo -e "  ${GREEN}11)${NC} Generate Index Page"
-    echo -e "  ${GREEN}12)${NC} Update Script"
+    echo -e "  ${GREEN}5)${NC} Backup Configuration"
+    echo -e "  ${GREEN}6)${NC} Check Status"
+    echo -e "  ${GREEN}7)${NC} Test Configuration"
+    echo -e "  ${GREEN}8)${NC} View Logs"
+    echo -e "  ${GREEN}9)${NC} Regenerate Index Page"
+    echo -e "  ${GREEN}10)${NC} Dry Run (Test without changes)"
     echo -e "  ${GREEN}0)${NC} Exit\n"
 
-    read -p "Enter your choice [0-12]: " choice
+    read -p "Enter your choice [0-10]: " choice
 
     case ${choice} in
         1) installation_wizard ;;
         2) uninstall_mrtg ;;
         3) setup_cron ;;
         4)
-            log "INFO" "Removing cron job..."
-            crontab -l 2>/dev/null | grep -v "${MRTG_BIN}/run-mrtg.sh" | crontab -
-            log "SUCCESS" "Cron job removed"
+            if confirm_action "Remove MRTG cron job?"; then
+                crontab -l 2>/dev/null | grep -v "mrtg" | crontab -
+                log "SUCCESS" "Cron job removed"
+            fi
             ;;
-        5)
-            log "INFO" "Reconfiguring MRTG..."
-            generate_mrtg_config
-            setup_cron
+        5) backup_config ;;
+        6) check_status ;;
+        7)
+            log "INFO" "Testing MRTG configuration..."
+            if [[ -f "${MRTG_CONF}/mrtg.cfg" ]]; then
+                env LANG=C mrtg "${MRTG_CONF}/mrtg.cfg" --check
+            else
+                log "ERROR" "Configuration not found"
+            fi
             ;;
-        6) backup_config ;;
-        7) restore_config ;;
-        8) check_status ;;
-        9)
+        8)
             if [[ -f "${MRTG_LOG}/mrtg.log" ]]; then
                 tail -50 "${MRTG_LOG}/mrtg.log"
             else
                 log "ERROR" "Log file not found"
             fi
             ;;
+        9)
+            if [[ -f "${MRTG_CONF}/mrtg.cfg" ]]; then
+                indexmaker "${MRTG_CONF}/mrtg.cfg" --output="${WEB_ROOT}/mrtg/index.html"
+                log "SUCCESS" "Index page regenerated"
+            fi
+            ;;
         10)
-            log "INFO" "Testing MRTG configuration..."
-            env LANG=C /usr/bin/mrtg "${MRTG_CONF}/mrtg.cfg" --check
-            ;;
-        11)
-            log "INFO" "Generating index page..."
-            /usr/bin/indexmaker "${MRTG_CONF}/mrtg.cfg" --output="${DEFAULT_HTML_DIR}/index.html"
-            log "SUCCESS" "Index page generated"
-            ;;
-        12)
-            log "INFO" "Updating script..."
-            wget -O "${0}" "https://raw.githubusercontent.com/waelisa/mrtg-monitor/main/install-mrtg.sh"
-            chmod +x "${0}"
-            log "SUCCESS" "Script updated. Please restart."
-            exit 0
+            DRY_RUN=true
+            log "INFO" "Running in DRY RUN mode - no changes will be made"
+            installation_wizard
+            DRY_RUN=false
             ;;
         0)
-            echo -e "${GREEN}Thank you for using MRTG Professional Monitoring Suite!${NC}"
+            echo -e "\n${GREEN}Thank you for using MRTG Professional Suite!${NC}"
             exit 0
             ;;
         *)
@@ -1102,105 +1159,94 @@ show_menu() {
 }
 
 # =============================================================================
-# MAIN SCRIPT EXECUTION
+# COMMAND LINE ARGUMENTS
 # =============================================================================
 
+print_help() {
+    cat << EOF
+${BOLD}NAME${NC}
+    install-mrtg.sh - MRTG Professional Monitoring Suite
+
+${BOLD}SYNOPSIS${NC}
+    $0 [OPTIONS]
+
+${BOLD}OPTIONS${NC}
+    --help, -h              Show this help message
+    --install, -i           Run installation wizard
+    --uninstall, -u         Complete uninstall MRTG
+    --dry-run               Test installation without making changes
+    --status, -s            Check MRTG status
+    --backup, -b            Backup configuration
+    --version, -v           Show version
+
+${BOLD}EXAMPLES${NC}
+    $0 --install            # Interactive installation
+    $0 --dry-run            # Test without changes
+    $0 --uninstall          # Remove MRTG
+    $0 --status             # Check status
+
+${BOLD}AUTHOR${NC}
+    Written by ${SCRIPT_AUTHOR} <${SCRIPT_URL}>
+EOF
+}
+
 main() {
-    # Initialize log
+    # Create log file
     touch "${LOG_FILE}"
     chmod 644 "${LOG_FILE}"
 
-    # Parse command line arguments
+    # Parse arguments
     if [[ $# -gt 0 ]]; then
-        while [[ $# -gt 0 ]]; do
-            case $1 in
-                --help|-h)
-                    print_help
-                    exit 0
-                    ;;
-                --install|-i)
-                    check_root
-                    installation_wizard
-                    exit 0
-                    ;;
-                --uninstall|-u)
-                    check_root
-                    shift
-                    uninstall_mrtg "$1"
-                    exit 0
-                    ;;
-                --cron-add|-ca)
-                    check_root
-                    shift
-                    if [[ "$1" == "--interval" || "$1" == "-in" ]]; then
-                        shift
-                        INTERVAL="$1"
-                        shift
-                    fi
-                    setup_cron
-                    exit 0
-                    ;;
-                --cron-remove|-cr)
-                    check_root
-                    crontab -l 2>/dev/null | grep -v "${MRTG_BIN}/run-mrtg.sh" | crontab -
-                    log "SUCCESS" "Cron job removed"
-                    exit 0
-                    ;;
-                --configure|-c)
-                    check_root
-                    generate_mrtg_config
-                    setup_cron
-                    log "SUCCESS" "Reconfiguration completed"
-                    exit 0
-                    ;;
-                --backup|-b)
-                    check_root
-                    backup_config
-                    exit 0
-                    ;;
-                --restore|-r)
-                    check_root
-                    restore_config
-                    exit 0
-                    ;;
-                --status|-s)
-                    check_status
-                    exit 0
-                    ;;
-                --version|-v)
-                    echo "${SCRIPT_NAME} ${SCRIPT_VERSION}"
-                    exit 0
-                    ;;
-                --interval|-in)
-                    shift
-                    INTERVAL="$1"
-                    shift
-                    ;;
-                --email|-e)
-                    shift
-                    DEFAULT_EMAIL="$1"
-                    shift
-                    ;;
-                --html-dir|-hd)
-                    shift
-                    DEFAULT_HTML_DIR="$1"
-                    shift
-                    ;;
-                *)
-                    echo -e "${RED}Unknown option: $1${NC}"
-                    print_help
-                    exit 1
-                    ;;
-            esac
-        done
+        case $1 in
+            --help|-h)
+                print_help
+                exit 0
+                ;;
+            --install|-i)
+                check_root
+                installation_wizard
+                exit 0
+                ;;
+            --uninstall|-u)
+                check_root
+                uninstall_mrtg
+                exit 0
+                ;;
+            --dry-run)
+                check_root
+                DRY_RUN=true
+                installation_wizard
+                exit 0
+                ;;
+            --status|-s)
+                check_root
+                detect_web_server
+                check_status
+                exit 0
+                ;;
+            --backup|-b)
+                check_root
+                backup_config
+                exit 0
+                ;;
+            --version|-v)
+                echo "MRTG Professional Suite ${SCRIPT_VERSION}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Unknown option: $1${NC}"
+                print_help
+                exit 1
+                ;;
+        esac
     else
-        # Interactive mode
+        # Interactive menu
         show_menu
     fi
 }
 
 # Trap errors
-trap 'error_exit "Script interrupted on line $LINENO"' ERR
+trap 'error_exit "Error on line $LINENO"' ERR
 
 # Run main function
 main "$@"
