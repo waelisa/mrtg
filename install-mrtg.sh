@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v2.2.6
+# MRTG Professional Monitoring Suite - Enterprise Edition v2.2.7
 # Production-Hardened Network Monitoring for Hosting Environments
 # The definitive MRTG installer for hosting environments
 #
@@ -15,7 +15,7 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v2.2.6
+# Version:     v2.2.7
 # Build Date:  02/28/2026
 # License:     MIT
 #
@@ -65,7 +65,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v2.2.6"
+readonly SCRIPT_VERSION="v2.2.7"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -156,6 +156,7 @@ log() {
             *)         echo -e "${message}" ;;
         esac
     fi
+    return 0  # Always return success to avoid breaking pipelines
 }
 
 error_exit() {
@@ -1372,7 +1373,7 @@ configure_firewall() {
 
 # =============================================================================
 # FIXED create_directories function – ensures web directory is properly owned
-# with error handling for setfacl (line 1424 fix)
+# with error handling for setfacl and all log calls have || true
 # =============================================================================
 create_directories() {
     log "INFO" "Creating directory structure..."
@@ -1407,20 +1408,20 @@ create_directories() {
 
     # Create web directory if it doesn't exist
     if [[ ! -d "${WEB_MRTG_DIR}" ]]; then
-        mkdir -p "${WEB_MRTG_DIR}" || log "WARNING" "Could not create web directory"
+        mkdir -p "${WEB_MRTG_DIR}" || log "WARNING" "Could not create web directory" || true
     fi
 
     # Set proper ownership for web directory (DirectAdmin)
     if [[ "${PANEL_TYPE}" == "directadmin" ]] && id diradmin >/dev/null 2>&1; then
         log "INFO" "Setting DirectAdmin ownership on web directory"
-        chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set ownership on web directory"
-        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on web directory"
+        chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set ownership on web directory" || true
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on web directory" || true
 
-        # Set ACLs for DirectAdmin to read the files (non-fatal if fails) - FIXED LINE 1424
+        # Set ACLs for DirectAdmin to read the files (non-fatal if fails)
         if command -v setfacl >/dev/null 2>&1; then
             # Ensure directory exists before setfacl
             if [[ -d "${WEB_MRTG_DIR}" ]]; then
-                setfacl -R -m u:diradmin:rx "${WEB_MRTG_DIR}" 2>/dev/null || log "DEBUG" "setfacl command failed (ignored)"
+                setfacl -R -m u:diradmin:rx "${WEB_MRTG_DIR}" 2>/dev/null || log "DEBUG" "setfacl command failed (ignored)" || true
                 log "DEBUG" "Attempted to set ACLs for diradmin on web directory"
             fi
         else
@@ -1430,8 +1431,8 @@ create_directories() {
         log "INFO" "Setting ownership to ${WEB_USER}:${WEB_GROUP} on web directory"
         chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || \
         chown -R "${WEB_USER}" "${WEB_MRTG_DIR}" 2>/dev/null || \
-        log "WARNING" "Could not set ownership on web directory"
-        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on web directory"
+        { log "WARNING" "Could not set ownership on web directory" || true; }
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on web directory" || true
     fi
 
     # Set permissions on MRTG base directories
@@ -1541,7 +1542,7 @@ EOF
 
     # Grant diradmin access to MRTG web directory (non-fatal if fails)
     if [[ -d "${WEB_MRTG_DIR}" ]] && command -v setfacl >/dev/null 2>&1; then
-        setfacl -R -m u:diradmin:rx "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set ACLs for diradmin"
+        setfacl -R -m u:diradmin:rx "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set ACLs for diradmin" || true
         log "DEBUG" "Set ACLs for diradmin on web directory"
     else
         log "DEBUG" "setfacl not available or directory missing, skipping ACL setup"
@@ -1570,7 +1571,7 @@ setup_rspamd_monitoring() {
     # Create the Rspamd stats helper script with robust JSON parsing
     cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
 #!/bin/bash
-# Rspamd Statistics Collector for MRTG v2.2.6
+# Rspamd Statistics Collector for MRTG v2.2.7
 # Handles timeouts, permissions, and malformed JSON gracefully
 
 # Query with 2-second timeout to prevent hanging
@@ -1675,7 +1676,7 @@ setup_cron() {
     # All runner-specific variables are escaped with backslash
     cat > "${MRTG_BIN}/run-mrtg.sh" << EOF
 #!/bin/bash
-# MRTG Runner - Generated by MRTG Professional Suite v2.2.6
+# MRTG Runner - Generated by MRTG Professional Suite v2.2.7
 # Includes lockfile to prevent race conditions on high-traffic servers
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
