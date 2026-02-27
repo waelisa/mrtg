@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v2.1.10
+# MRTG Professional Monitoring Suite - Enterprise Edition v2.2.0
 # Production-Hardened Network Monitoring for Hosting Environments
 # The definitive MRTG installer for hosting environments
 #
@@ -15,7 +15,7 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v2.1.10
+# Version:     v2.2.0
 # Build Date:  02/27/2026
 # License:     MIT
 #
@@ -64,7 +64,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v2.1.10"
+readonly SCRIPT_VERSION="v2.2.0"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -885,27 +885,30 @@ EOF
     fi
 
     # CRITICAL: Wait for SNMP to fully initialize and bind to ports
-    log "INFO" "Waiting 5 seconds for SNMP service to stabilize..."
-    sleep 5
+    log "INFO" "Waiting 10 seconds for SNMP service to stabilize..."
+    sleep 10
 
-    # Verify SNMP is working
-    local max_attempts=5
+    # Verify SNMP is working with retry logic
+    local max_attempts=10
     local attempt=1
     while [[ $attempt -le $max_attempts ]]; do
         if command -v snmpwalk >/dev/null 2>&1; then
-            if snmpwalk -v 2c -c "${SNMP_COMMUNITY}" -t 2 127.0.0.1 system 2>/dev/null | grep -q "sysName"; then
+            if snmpwalk -v 2c -c "${SNMP_COMMUNITY}" -t 5 127.0.0.1 system 2>/dev/null | grep -q "sysName"; then
                 log "SUCCESS" "SNMP verified and responding"
                 break
             fi
         fi
         log "INFO" "Waiting for SNMP response (attempt ${attempt}/${max_attempts})..."
-        sleep 2
+        sleep 3
         ((attempt++))
     done
 
     if [[ $attempt -gt $max_attempts ]]; then
-        log "WARNING" "SNMP verification failed - check configuration manually"
+        log "WARNING" "SNMP verification failed after multiple attempts - check configuration manually"
+        log "INFO" "You can test manually with: snmpwalk -v 2c -c ${SNMP_COMMUNITY} 127.0.0.1 system"
     fi
+
+    return 0
 }
 
 # =============================================================================
@@ -1348,7 +1351,7 @@ configure_firewall() {
 }
 
 # =============================================================================
-# FIXED create_directories function – handles chown errors gracefully with || true
+# FIXED create_directories function – ensures web directory is properly owned
 # =============================================================================
 create_directories() {
     log "INFO" "Creating directory structure..."
@@ -1362,7 +1365,6 @@ create_directories() {
         "${MRTG_SCRIPTS}"
         "${MRTG_VAR}"
         "${BACKUP_DIR}"
-        "${WEB_MRTG_DIR}"
     )
 
     for dir in "${dirs[@]}"; do
@@ -1379,7 +1381,28 @@ create_directories() {
         fi
     done
 
-    # Set permissions with error handling
+    # CRITICAL: Ensure web directory exists with proper ownership
+    log "INFO" "Setting up web directory: ${WEB_MRTG_DIR}"
+
+    # Create web directory if it doesn't exist
+    if [[ ! -d "${WEB_MRTG_DIR}" ]]; then
+        mkdir -p "${WEB_MRTG_DIR}" || log "WARNING" "Could not create web directory"
+    fi
+
+    # Set proper ownership for web directory (DirectAdmin)
+    if [[ "${PANEL_TYPE}" == "directadmin" ]] && id diradmin >/dev/null 2>&1; then
+        log "INFO" "Setting DirectAdmin ownership on web directory"
+        chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set ownership on web directory"
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on web directory"
+    elif id "${WEB_USER}" >/dev/null 2>&1; then
+        log "INFO" "Setting ownership to ${WEB_USER}:${WEB_GROUP} on web directory"
+        chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || \
+        chown -R "${WEB_USER}" "${WEB_MRTG_DIR}" 2>/dev/null || \
+        log "WARNING" "Could not set ownership on web directory"
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on web directory"
+    fi
+
+    # Set permissions on MRTG base directories
     if [[ "${DRY_RUN}" != true ]]; then
         log "INFO" "Setting directory permissions..."
 
@@ -1389,14 +1412,13 @@ create_directories() {
         chmod 755 "${MRTG_LOG}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_LOG}" || true
         chmod 755 "${MRTG_HTML}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_HTML}" || true
         chmod 755 "${MRTG_SCRIPTS}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_SCRIPTS}" || true
-        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on ${WEB_MRTG_DIR}" || true
 
         # =====================================================================
         # CRITICAL FIX: Robust ownership assignment with || true at the end
         # This prevents the error trap from triggering on chown failures
         # =====================================================================
         if id "${WEB_USER}" >/dev/null 2>&1; then
-            log "INFO" "Attempting to set ownership to ${WEB_USER}..."
+            log "INFO" "Attempting to set ownership to ${WEB_USER} on MRTG base..."
 
             # Try to set ownership on MRTG base directory - with || true at the end
             if chown -R "${WEB_USER}:${WEB_GROUP}" "${MRTG_BASE}" 2>/dev/null; then
@@ -1411,22 +1433,6 @@ create_directories() {
             fi
             # Ensure we always continue regardless of chown results
             true
-
-            # Try to set ownership on web directory - with || true at the end
-            if [[ -d "${WEB_MRTG_DIR}" ]]; then
-                if chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null; then
-                    log "SUCCESS" "Ownership set to ${WEB_USER}:${WEB_GROUP} for web directory"
-                else
-                    # Fallback: try just user without group
-                    if chown -R "${WEB_USER}" "${WEB_MRTG_DIR}" 2>/dev/null; then
-                        log "SUCCESS" "Ownership set to ${WEB_USER} (group skipped) for web directory"
-                    else
-                        log "WARNING" "Could not set ownership on web directory - continuing with current permissions"
-                    fi
-                fi
-                # Ensure we always continue regardless of chown results
-                true
-            fi
         else
             log "WARNING" "User ${WEB_USER} not found, directories will remain with current ownership"
         fi
@@ -1449,7 +1455,7 @@ setup_rspamd_monitoring() {
     # Create the Rspamd stats helper script with robust JSON parsing
     cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
 #!/bin/bash
-# Rspamd Statistics Collector for MRTG v2.1.10
+# Rspamd Statistics Collector for MRTG v2.2.0
 # Handles timeouts, permissions, and malformed JSON gracefully
 
 # Query with 2-second timeout to prevent hanging
@@ -1554,7 +1560,7 @@ setup_cron() {
     # All runner-specific variables are escaped with backslash
     cat > "${MRTG_BIN}/run-mrtg.sh" << EOF
 #!/bin/bash
-# MRTG Runner - Generated by MRTG Professional Suite v2.1.10
+# MRTG Runner - Generated by MRTG Professional Suite v2.2.0
 # Includes lockfile to prevent race conditions on high-traffic servers
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -1937,7 +1943,7 @@ initialize_mrtg() {
 }
 
 # =============================================================================
-# HEALTH CHECK FUNCTIONS
+# ENHANCED HEALTH CHECK FUNCTIONS
 # =============================================================================
 
 verify_system_health() {
@@ -1975,12 +1981,22 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # Test SNMP
+    # Test SNMP with multiple attempts
+    local snmp_ok=false
     if command -v snmpget >/dev/null 2>&1; then
-        if snmpget -v 2c -c "${SNMP_COMMUNITY}" -t 2 127.0.0.1 sysUpTime.0 >/dev/null 2>&1; then
+        for attempt in {1..3}; do
+            if snmpget -v 2c -c "${SNMP_COMMUNITY}" -t 5 127.0.0.1 sysUpTime.0 >/dev/null 2>&1; then
+                snmp_ok=true
+                break
+            fi
+            sleep 2
+        done
+
+        if [[ "${snmp_ok}" == true ]]; then
             echo -e "  ${GREEN}✓${NC} SNMP responding"
         else
-            echo -e "  ${RED}✗${NC} SNMP not responding - check community string"
+            echo -e "  ${RED}✗${NC} SNMP not responding - check community string: ${SNMP_COMMUNITY}"
+            echo -e "  ${YELLOW}  Try: snmpwalk -v 2c -c ${SNMP_COMMUNITY} 127.0.0.1 system${NC}"
             ((errors++))
         fi
     fi
@@ -2042,6 +2058,14 @@ verify_system_health() {
     echo -e "\n${BOLD}6. Web Interface${NC}"
     if [[ -d "${WEB_MRTG_DIR}" ]]; then
         echo -e "  ${GREEN}✓${NC} Web directory exists"
+
+        # Check web directory permissions
+        if [[ -O "${WEB_MRTG_DIR}" ]]; then
+            echo -e "  ${GREEN}✓${NC} Web directory owned by correct user"
+        else
+            echo -e "  ${YELLOW}⚠${NC} Web directory ownership may need adjustment"
+            ((warnings++))
+        fi
 
         local image_count=$(find "${WEB_MRTG_DIR}" -name "*.png" 2>/dev/null | wc -l || echo "0")
         if [[ ${image_count} -gt 0 ]]; then
@@ -2186,7 +2210,7 @@ verify_system_health() {
 }
 
 repair_installation() {
-    log "INFO" "Attempting repair..."
+    log "INFO" "Starting repair process..."
 
     if [[ "${DRY_RUN}" == true ]]; then
         log "INFO" "Would attempt repair"
@@ -2196,6 +2220,15 @@ repair_installation() {
     # Backup first
     backup_config
 
+    # Fix web directory permissions
+    log "INFO" "Fixing web directory permissions..."
+    if [[ "${PANEL_TYPE}" == "directadmin" ]] && id diradmin >/dev/null 2>&1; then
+        mkdir -p "${WEB_MRTG_DIR}" 2>/dev/null || true
+        chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+        log "SUCCESS" "Web directory permissions fixed for DirectAdmin"
+    fi
+
     # Restart SNMP
     log "INFO" "Restarting SNMP..."
     if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
@@ -2203,7 +2236,7 @@ repair_installation() {
     else
         service snmpd restart || true
     fi
-    sleep 5
+    sleep 10
 
     # Fix Rspamd permissions if needed
     if [[ "${HAS_RSPAMD}" == true ]]; then
