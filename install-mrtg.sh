@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v1.3.0
-# Ultra-reliable, production-hardened monitoring for hosting environments
+# MRTG Professional Monitoring Suite - Enterprise Edition v1.5.0
+# Production-Ready Network Monitoring for Hosting Environments
 #
 # =============================================================================
 # ██╗    ██╗ █████╗ ███████╗██╗         ██╗███████╗ █████╗
@@ -14,32 +14,33 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v1.3.0
+# Version:     v1.5.0
 # Build Date:  02/27/2026
 # License:     MIT
 #
 # DESCRIPTION:
-#   Enterprise-grade MRTG installer that WORKS with ANY existing setup
-#   - Zero assumptions about web server configuration
-#   - Intelligent detection of running services
-#   - Safe firewall configuration (CSF/firewalld/UFW/iptables)
-#   - Complete uninstall with rollback capability
-#   - Self-healing health checks
-#   - Dry-run mode for testing
+#   Zero-assumption MRTG installer for production hosting environments
+#   - Detects and works with ANY existing web server (Apache/Nginx/LiteSpeed)
+#   - Full DirectAdmin/cPanel/Plesk integration
+#   - Smart CSF/firewalld/UFW configuration
+#   - Complete uninstall with rollback
+#   - Real-time health monitoring
+#   - Automatic updates from GitHub
 #
 # USAGE:
 #   ./install-mrtg.sh [OPTIONS]
 #
 # OPTIONS:
-#   --install, -i     Run installation wizard
+#   --install, -i     Full installation wizard
 #   --uninstall, -u   Complete removal with backup
-#   --status, -s      Full system health check
-#   --repair, -r      Attempt to repair broken installation
-#   --backup, -b      Backup current configuration
+#   --status, -s      Detailed health check
+#   --repair, -r      Auto-fix common issues
+#   --backup, -b      Backup configuration
 #   --restore, -R     Restore from backup
-#   --dry-run         Test without making changes
-#   --force           Skip confirmations (use with caution)
-#   --help, -h        Show this help message
+#   --update, -U      Self-update from GitHub
+#   --dry-run         Test without changes
+#   --force           Skip confirmations
+#   --help, -h        Show this help
 #
 # =============================================================================
 
@@ -50,13 +51,34 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v1.3.0"
+readonly SCRIPT_VERSION="v1.5.0"
 readonly SCRIPT_AUTHOR="Wael Isa"
-readonly SCRIPT_URL="https://github.com/waelisa/mrtg"
+readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
 readonly BACKUP_DIR="/root/mrtg-backups"
 readonly LOCK_FILE="/var/run/mrtg-installer.lock"
 readonly SCRIPT_NAME=$(basename "$0")
+
+# Installation paths
+readonly MRTG_BASE="/usr/local/mrtg"
+readonly MRTG_CONF="${MRTG_BASE}/conf"
+readonly MRTG_LOG="${MRTG_BASE}/logs"
+readonly MRTG_HTML="${MRTG_BASE}/html"
+readonly MRTG_BIN="${MRTG_BASE}/bin"
+readonly MRTG_VAR="/var/lib/mrtg"
+
+# Default values
+DEFAULT_INTERVAL=5
+DEFAULT_EMAIL="root@localhost"
+SNMP_COMMUNITY=""
+WEB_ROOT=""
+WEB_USER=""
+WEB_GROUP=""
+WEB_SERVER="unknown"
+PANEL_TYPE="none"
+INTERVAL=${DEFAULT_INTERVAL}
+FORCE_MODE=false
+DRY_RUN=false
 
 # Color codes
 readonly RED='\033[0;31m'
@@ -69,26 +91,6 @@ readonly WHITE='\033[1;37m'
 readonly NC='\033[0m'
 readonly BOLD='\033[1m'
 
-# Installation paths
-MRTG_BASE="/usr/local/mrtg"
-MRTG_CONF="${MRTG_BASE}/conf"
-MRTG_LOG="${MRTG_BASE}/logs"
-MRTG_HTML="${MRTG_BASE}/html"
-MRTG_BIN="${MRTG_BASE}/bin"
-MRTG_VAR="/var/lib/mrtg"
-
-# Default values
-DEFAULT_INTERVAL=5
-DEFAULT_EMAIL="root@localhost"
-SNMP_COMMUNITY=""
-WEB_ROOT=""
-WEB_USER=""
-WEB_GROUP=""
-WEB_SERVER="unknown"
-INTERVAL=${DEFAULT_INTERVAL}
-FORCE_MODE=false
-DRY_RUN=false
-
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
@@ -99,10 +101,8 @@ log() {
     local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
-    # Always log to file
     echo -e "${timestamp} [${level}] ${message}" >> "${LOG_FILE}"
 
-    # Console output with colors (skip in dry-run unless error)
     if [[ "${DRY_RUN}" == true && "${level}" != "ERROR" ]]; then
         echo -e "${YELLOW}[DRY RUN]${NC} ${message}"
     else
@@ -155,12 +155,86 @@ acquire_lock() {
     trap 'rm -f "${LOCK_FILE}"' EXIT
 }
 
-cleanup() {
-    rm -f "${LOCK_FILE}" 2>/dev/null || true
+# =============================================================================
+# SELF-UPDATE FUNCTION
+# =============================================================================
+
+self_update() {
+    log "INFO" "Checking for updates from GitHub..."
+
+    local tmp_file="/tmp/mrtg_update_$$.sh"
+    local backup_file="/tmp/mrtg_backup_$$.sh"
+
+    # Download latest version
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -s -o "${tmp_file}" "${REPO_URL}"; then
+            log "ERROR" "Failed to download update"
+            return 1
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if ! wget -q -O "${tmp_file}" "${REPO_URL}"; then
+            log "ERROR" "Failed to download update"
+            return 1
+        fi
+    else
+        log "ERROR" "Neither curl nor wget found"
+        return 1
+    fi
+
+    # Check if download was successful and file exists
+    if [[ ! -s "${tmp_file}" ]]; then
+        log "ERROR" "Downloaded file is empty"
+        rm -f "${tmp_file}"
+        return 1
+    fi
+
+    # Get versions
+    local current_ver=$(grep "^readonly SCRIPT_VERSION=" "$0" | cut -d'"' -f2)
+    local new_ver=$(grep "^readonly SCRIPT_VERSION=" "${tmp_file}" | cut -d'"' -f2)
+
+    if [[ -z "${new_ver}" ]]; then
+        log "ERROR" "Invalid update file"
+        rm -f "${tmp_file}"
+        return 1
+    fi
+
+    if [[ "${current_ver}" == "${new_ver}" ]]; then
+        log "SUCCESS" "Script is already up to date (${current_ver})"
+        rm -f "${tmp_file}"
+        return 0
+    fi
+
+    log "INFO" "Current version: ${current_ver}, New version: ${new_ver}"
+
+    # Backup current script
+    cp "$0" "${backup_file}"
+    chmod 644 "${backup_file}"
+
+    # Apply update
+    if cp "${tmp_file}" "$0"; then
+        chmod +x "$0"
+        log "SUCCESS" "Updated to version ${new_ver}"
+        log "INFO" "Backup saved to: ${backup_file}"
+        rm -f "${tmp_file}"
+
+        # Show changelog or differences
+        if command -v diff >/dev/null 2>&1; then
+            echo -e "\n${BOLD}Changes since ${current_ver}:${NC}"
+            diff -u <(grep -v '^#' "${backup_file}" | head -50) <(grep -v '^#' "$0" | head -50) 2>/dev/null || true
+        fi
+
+        echo -e "\n${GREEN}Please restart the script to use the new version.${NC}"
+        exit 0
+    else
+        log "ERROR" "Failed to apply update"
+        cp "${backup_file}" "$0"
+        rm -f "${tmp_file}" "${backup_file}"
+        return 1
+    fi
 }
 
 # =============================================================================
-# ENHANCED DETECTION FUNCTIONS
+# DETECTION FUNCTIONS
 # =============================================================================
 
 detect_os() {
@@ -172,62 +246,55 @@ detect_os() {
         OS_VERSION="${VERSION_ID}"
         OS_ID="${ID}"
         OS_ID_LIKE="${ID_LIKE:-}"
-    elif [[ -f /etc/debian_version ]]; then
-        OS_NAME="Debian"
-        OS_VERSION=$(cat /etc/debian_version)
-        OS_ID="debian"
-        OS_ID_LIKE="debian"
-    elif [[ -f /etc/redhat-release ]]; then
-        OS_NAME="RedHat"
-        OS_VERSION=$(rpm -q --qf "%{VERSION}" $(rpm -q --whatprovides redhat-release) 2>/dev/null || echo "unknown")
-        OS_ID="rhel"
-        OS_ID_LIKE="rhel"
+        log "SUCCESS" "Detected: ${OS_NAME} ${OS_VERSION}"
     else
-        error_exit "Unsupported operating system"
+        OS_NAME="unknown"
+        OS_VERSION="unknown"
+        OS_ID="unknown"
+        log "WARNING" "Could not detect OS"
     fi
-
-    log "SUCCESS" "Detected: ${OS_NAME} ${OS_VERSION} (${OS_ID})"
 }
 
 detect_control_panel() {
     PANEL_TYPE="none"
+    PANEL_VERSION="unknown"
 
     # DirectAdmin
     if [[ -d /usr/local/directadmin ]]; then
         PANEL_TYPE="directadmin"
         if [[ -f /usr/local/directadmin/conf/directadmin.conf ]]; then
-            PANEL_VERSION=$(grep -i version /usr/local/directadmin/conf/directadmin.conf | cut -d= -f2 | tr -d ' ')
+            PANEL_VERSION=$(grep -i "^version=" /usr/local/directadmin/conf/directadmin.conf 2>/dev/null | cut -d= -f2 || echo "unknown")
         fi
-        log "SUCCESS" "DirectAdmin detected (Version: ${PANEL_VERSION:-unknown})"
+        log "SUCCESS" "DirectAdmin detected (v${PANEL_VERSION})"
 
     # cPanel
     elif [[ -d /usr/local/cpanel ]]; then
         PANEL_TYPE="cpanel"
         if command -v /usr/local/cpanel/cpanel >/dev/null; then
-            PANEL_VERSION=$(/usr/local/cpanel/cpanel -V 2>/dev/null || echo "unknown")
+            PANEL_VERSION=$(/usr/local/cpanel/cpanel -V 2>/dev/null | head -1 | tr -d ' ' || echo "unknown")
         fi
-        log "SUCCESS" "cPanel detected (Version: ${PANEL_VERSION:-unknown})"
+        log "SUCCESS" "cPanel detected (v${PANEL_VERSION})"
 
     # Plesk
     elif [[ -d /usr/local/psa ]]; then
         PANEL_TYPE="plesk"
         if command -v plesk >/dev/null; then
-            PANEL_VERSION=$(plesk version 2>/dev/null | head -1 | awk '{print $2}')
+            PANEL_VERSION=$(plesk version 2>/dev/null | grep -i "version" | head -1 | awk '{print $2}' || echo "unknown")
         fi
-        log "SUCCESS" "Plesk detected (Version: ${PANEL_VERSION:-unknown})"
+        log "SUCCESS" "Plesk detected (v${PANEL_VERSION})"
 
     # ISPConfig
     elif [[ -d /usr/local/ispconfig ]]; then
         PANEL_TYPE="ispconfig"
         log "SUCCESS" "ISPConfig detected"
 
-    # Vestacp
+    # VestaCP
     elif [[ -d /usr/local/vesta ]]; then
         PANEL_TYPE="vestacp"
         log "SUCCESS" "VestaCP detected"
 
     # Webmin/Virtualmin
-    elif [[ -d /usr/share/webmin ]]; then
+    elif [[ -d /usr/share/webmin ]] || [[ -d /usr/libexec/webmin ]]; then
         PANEL_TYPE="webmin"
         log "SUCCESS" "Webmin detected"
     fi
@@ -238,11 +305,11 @@ detect_web_server() {
 
     local web_servers_found=()
 
-    # Check for running processes (most reliable)
+    # Check for running processes
     if pgrep -x "nginx" >/dev/null 2>&1; then
         WEB_SERVER="nginx"
-        WEB_USER=$(ps aux | grep nginx | grep -v grep | head -1 | awk '{print $1}' || echo "www-data")
-        WEB_GROUP=$(id -gn "${WEB_USER}" 2>/dev/null || echo "www-data")
+        WEB_USER=$(ps aux | grep nginx | grep -v grep | head -1 | awk '{print $1}')
+        WEB_GROUP=$(id -gn "${WEB_USER}" 2>/dev/null || echo "${WEB_USER}")
         web_servers_found+=("nginx (active)")
     fi
 
@@ -265,13 +332,6 @@ detect_web_server() {
         web_servers_found+=("litespeed (active)")
     fi
 
-    if pgrep -x "caddy" >/dev/null 2>&1; then
-        WEB_SERVER="caddy"
-        WEB_USER=$(ps aux | grep caddy | grep -v grep | head -1 | awk '{print $1}' || echo "caddy")
-        WEB_GROUP=$(id -gn "${WEB_USER}" 2>/dev/null || echo "caddy")
-        web_servers_found+=("caddy (active)")
-    fi
-
     if pgrep -x "openlitespeed" >/dev/null 2>&1; then
         WEB_SERVER="openlitespeed"
         WEB_USER="nobody"
@@ -279,10 +339,34 @@ detect_web_server() {
         web_servers_found+=("openlitespeed (active)")
     fi
 
-    # If multiple web servers found, prioritize
+    if pgrep -x "caddy" >/dev/null 2>&1; then
+        WEB_SERVER="caddy"
+        WEB_USER=$(ps aux | grep caddy | grep -v grep | head -1 | awk '{print $1}')
+        WEB_GROUP=$(id -gn "${WEB_USER}" 2>/dev/null || echo "${WEB_USER}")
+        web_servers_found+=("caddy (active)")
+    fi
+
+    # Panel-specific overrides
+    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
+        WEB_USER="diradmin"
+        WEB_GROUP="diradmin"
+        if [[ -z "${WEB_SERVER}" ]] || [[ "${WEB_SERVER}" == "unknown" ]]; then
+            WEB_SERVER="apache"  # DirectAdmin uses Apache
+        fi
+    elif [[ "${PANEL_TYPE}" == "cpanel" ]]; then
+        WEB_USER="apache"
+        WEB_GROUP="apache"
+        WEB_SERVER="apache"
+    elif [[ "${PANEL_TYPE}" == "plesk" ]]; then
+        WEB_USER="www-data"
+        WEB_GROUP="www-data"
+        WEB_SERVER="apache"
+    fi
+
+    # If multiple servers found, prioritize
     if [[ ${#web_servers_found[@]} -gt 1 ]]; then
         log "WARNING" "Multiple web servers detected: ${web_servers_found[*]}"
-        # Prioritize nginx > apache > litespeed
+        # Priority: nginx > apache > litespeed
         for server in nginx apache litespeed openlitespeed caddy; do
             if [[ " ${web_servers_found[*]} " =~ ${server} ]]; then
                 WEB_SERVER="${server}"
@@ -290,21 +374,13 @@ detect_web_server() {
                 break
             fi
         done
-    elif [[ ${#web_servers_found[@]} -eq 0 ]]; then
-        # No running server, check installed
-        if command -v nginx >/dev/null 2>&1; then
-            WEB_SERVER="nginx"
-            WEB_USER="www-data"
-            WEB_GROUP="www-data"
-            log "WARNING" "Nginx installed but not running"
-        elif command -v apache2 >/dev/null 2>&1 || command -v httpd >/dev/null 2>&1; then
-            WEB_SERVER="apache"
-            WEB_USER=$([[ -f /etc/redhat-release ]] && echo "apache" || echo "www-data")
-            WEB_GROUP=$([[ -f /etc/redhat-release ]] && echo "apache" || echo "www-data")
-            log "WARNING" "Apache installed but not running"
-        else
-            error_exit "No supported web server detected. Please install nginx, apache, or litespeed first."
-        fi
+    fi
+
+    # No web server found
+    if [[ "${WEB_SERVER}" == "unknown" ]] || [[ -z "${WEB_SERVER}" ]]; then
+        log "ERROR" "No supported web server detected"
+        log "INFO" "Please ensure Apache, Nginx, or LiteSpeed is installed and running"
+        exit 1
     fi
 
     # Detect web root
@@ -320,71 +396,101 @@ detect_web_root() {
             if [[ -d "/var/www/html" ]]; then
                 WEB_ROOT="/var/www/html"
             elif [[ -d "/home/*/domains" ]]; then
-                WEB_ROOT="/var/www/html"  # fallback
+                WEB_ROOT="/var/www/html"
+            else
+                WEB_ROOT="/var/www/html"
             fi
             ;;
         "cpanel")
             if [[ -d "/usr/local/apache/htdocs" ]]; then
                 WEB_ROOT="/usr/local/apache/htdocs"
-            elif [[ -d "/home/*/public_html" ]]; then
-                # Use first user's public_html as fallback
+            elif [[ -d "/var/www/html" ]]; then
+                WEB_ROOT="/var/www/html"
+            else
                 WEB_ROOT="/usr/local/apache/htdocs"
             fi
             ;;
         "plesk")
             if [[ -d "/var/www/vhosts/default/htdocs" ]]; then
                 WEB_ROOT="/var/www/vhosts/default/htdocs"
-            else
+            elif [[ -d "/var/www/vhosts" ]]; then
                 WEB_ROOT="/var/www/vhosts"
+            else
+                WEB_ROOT="/var/www/html"
             fi
             ;;
         *)
-            # Generic web roots
-            local common_roots=(
-                "/var/www/html"
-                "/var/www"
-                "/usr/share/nginx/html"
-                "/srv/www/htdocs"
-                "/usr/local/www"
-                "/home/www"
-                "/var/www/htdocs"
-            )
-
-            for root in "${common_roots[@]}"; do
-                if [[ -d "${root}" ]]; then
-                    WEB_ROOT="${root}"
-                    break
-                fi
-            done
+            # Server-specific roots
+            case "${WEB_SERVER}" in
+                "nginx")
+                    if [[ -d "/usr/share/nginx/html" ]]; then
+                        WEB_ROOT="/usr/share/nginx/html"
+                    elif [[ -d "/var/www/html" ]]; then
+                        WEB_ROOT="/var/www/html"
+                    elif [[ -d "/srv/www/htdocs" ]]; then
+                        WEB_ROOT="/srv/www/htdocs"
+                    else
+                        WEB_ROOT="/var/www/html"
+                    fi
+                    ;;
+                "apache")
+                    if [[ -d "/var/www/html" ]]; then
+                        WEB_ROOT="/var/www/html"
+                    elif [[ -d "/var/www" ]]; then
+                        WEB_ROOT="/var/www"
+                    elif [[ -d "/srv/www/htdocs" ]]; then
+                        WEB_ROOT="/srv/www/htdocs"
+                    else
+                        WEB_ROOT="/var/www/html"
+                    fi
+                    ;;
+                "litespeed"|"openlitespeed")
+                    if [[ -d "/usr/local/lsws/htdocs" ]]; then
+                        WEB_ROOT="/usr/local/lsws/htdocs"
+                    else
+                        WEB_ROOT="/var/www/html"
+                    fi
+                    ;;
+                "caddy")
+                    if [[ -d "/var/www/html" ]]; then
+                        WEB_ROOT="/var/www/html"
+                    else
+                        WEB_ROOT="/var/www/html"
+                    fi
+                    ;;
+                *)
+                    WEB_ROOT="/var/www/html"
+                    ;;
+            esac
             ;;
     esac
 
     # Create web root if it doesn't exist
-    if [[ -z "${WEB_ROOT}" ]] || [[ ! -d "${WEB_ROOT}" ]]; then
-        WEB_ROOT="/var/www/html"
+    if [[ ! -d "${WEB_ROOT}" ]]; then
         log "WARNING" "Creating web root: ${WEB_ROOT}"
         mkdir -p "${WEB_ROOT}"
     fi
 
-    # Verify writability
-    if [[ ! -w "${WEB_ROOT}" ]]; then
-        log "WARNING" "Web root ${WEB_ROOT} is not writable. Check permissions."
-    fi
+    # Create mrtg subdirectory
+    WEB_MRTG_DIR="${WEB_ROOT}/mrtg"
+    mkdir -p "${WEB_MRTG_DIR}"
+
+    log "INFO" "Web directory: ${WEB_MRTG_DIR}"
 }
 
 detect_network_interfaces() {
     local interfaces=()
 
-    # Get all active network interfaces (with IP)
+    # Get all active network interfaces
     while IFS= read -r interface; do
-        # Skip loopback, virtual, and docker interfaces
-        if [[ ! "${interface}" =~ ^(lo|virbr|docker|veth|br-|tun) ]] && \
+        # Skip virtual interfaces
+        if [[ ! "${interface}" =~ ^(lo|virbr|docker|veth|br-|tun|vnet) ]] && \
            ip link show "${interface}" 2>/dev/null | grep -q "UP"; then
             interfaces+=("${interface}")
         fi
     done < <(ls /sys/class/net/ 2>/dev/null || ip link show | awk -F': ' '/^[0-9]+: / {print $2}' | cut -d@ -f1)
 
-    # Fallback to all interfaces except loopback
+    # Fallback
     if [[ ${#interfaces[@]} -eq 0 ]]; then
         while IFS= read -r interface; do
             if [[ "${interface}" != "lo" ]]; then
@@ -401,7 +507,7 @@ detect_ip_address() {
 
     # Try multiple methods
     if command -v ip >/dev/null 2>&1; then
-        ip=$(ip route get 1 2>/dev/null | awk '{print $NF;exit}' 2>/dev/null)
+        ip=$(ip route get 1 2>/dev/null | awk '{print $NF;exit}')
     fi
 
     if [[ -z "${ip}" ]] && command -v curl >/dev/null 2>&1; then
@@ -416,11 +522,11 @@ detect_ip_address() {
 }
 
 # =============================================================================
-# ENHANCED INSTALLATION FUNCTIONS
+# INSTALLATION FUNCTIONS
 # =============================================================================
 
 install_dependencies() {
-    log "INFO" "Installing MRTG and SNMP packages (no web server)..."
+    log "INFO" "Installing MRTG and SNMP packages..."
 
     if [[ "${DRY_RUN}" == true ]]; then
         log "INFO" "Would install: mrtg, snmpd, snmp, perl modules"
@@ -464,31 +570,41 @@ install_dependencies() {
                 ca-certificates
             ;;
         *)
-            error_exit "Unsupported OS for package installation: ${OS_ID}"
+            log "WARNING" "Unknown OS, attempting generic installation"
+            if command -v yum >/dev/null; then
+                yum install -y mrtg net-snmp net-snmp-utils
+            elif command -v apt-get >/dev/null; then
+                apt-get update && apt-get install -y mrtg snmpd snmp
+            else
+                error_exit "Cannot install packages - unsupported package manager"
+            fi
             ;;
     esac
 
     # Verify installations
+    local missing=()
     for cmd in mrtg snmpd cfgmaker indexmaker; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then
-            log "WARNING" "${cmd} not found in PATH"
-        else
-            log "DEBUG" "${cmd} found at $(command -v "${cmd}")"
+            missing+=("${cmd}")
         fi
     done
 
-    log "SUCCESS" "Dependencies installed"
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "WARNING" "Missing commands: ${missing[*]}"
+    else
+        log "SUCCESS" "All dependencies installed"
+    fi
 }
 
 configure_snmp() {
     log "INFO" "Configuring SNMP..."
 
-    # Generate secure community string if not set
+    # Generate secure community if not set
     if [[ -z "${SNMP_COMMUNITY}" ]]; then
         if command -v openssl >/dev/null 2>&1; then
             SNMP_COMMUNITY="mrtg_$(openssl rand -hex 8)"
         else
-            SNMP_COMMUNITY="mrtg_$(date +%s | sha256sum | base64 | head -c 16)"
+            SNMP_COMMUNITY="mrtg_$(date +%s | sha256sum | base64 | head -c 16 | tr -d '=')"
         fi
         log "INFO" "Generated secure community: ${SNMP_COMMUNITY}"
     fi
@@ -526,7 +642,7 @@ sysservices 0
 # Process monitoring
 proc  httpd 10 5
 proc  nginx 10 5
-proc  mysqld 10 5
+proc  mysql 10 5
 proc  sshd
 proc  snmpd
 
@@ -544,7 +660,6 @@ interface lo
 view   systemonly  included   .1.3.6.1.2.1.1
 view   systemonly  included   .1.3.6.1.2.1.2
 view   systemonly  included   .1.3.6.1.2.1.3
-view   all         included   .1                               80
 
 # Access control
 access  MyROGroup   ""         any       noauth    exact   all    none   none
@@ -557,10 +672,9 @@ access paranoid "" any noauth exact system none none
 
 EOF
 
-    # Fix permissions
     chmod 600 /etc/snmp/snmpd.conf
 
-    # Handle systemd vs init
+    # Start SNMP service
     if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
         systemctl unmask snmpd >/dev/null 2>&1 || true
         systemctl enable snmpd >/dev/null 2>&1 || true
@@ -569,20 +683,28 @@ EOF
         service snmpd restart
     fi
 
-    # Wait for SNMP to fully start
+    # Wait for SNMP to initialize
     log "INFO" "Waiting for SNMP to initialize..."
     sleep 5
 
-    # Verify SNMP is responding
-    if command -v snmpwalk >/dev/null 2>&1; then
-        if snmpwalk -v 2c -c "${SNMP_COMMUNITY}" -t 2 127.0.0.1 system 2>/dev/null | grep -q "sysName"; then
-            log "SUCCESS" "SNMP responding correctly"
-        else
-            log "WARNING" "SNMP not responding. Check configuration."
+    # Verify SNMP is working
+    local max_attempts=5
+    local attempt=1
+    while [[ $attempt -le $max_attempts ]]; do
+        if command -v snmpwalk >/dev/null 2>&1; then
+            if snmpwalk -v 2c -c "${SNMP_COMMUNITY}" -t 2 127.0.0.1 system 2>/dev/null | grep -q "sysName"; then
+                log "SUCCESS" "SNMP verified"
+                break
+            fi
         fi
-    fi
+        log "INFO" "Waiting for SNMP (attempt ${attempt}/${max_attempts})..."
+        sleep 2
+        ((attempt++))
+    done
 
-    log "SUCCESS" "SNMP configured"
+    if [[ $attempt -gt $max_attempts ]]; then
+        log "WARNING" "SNMP verification failed - check configuration"
+    fi
 }
 
 configure_firewall() {
@@ -595,24 +717,24 @@ configure_firewall() {
 
     local firewall_configured=false
 
-    # CSF (ConfigServer Firewall) - Most common in hosting
+    # CSF (ConfigServer Firewall) - Common in hosting
     if [[ -f /etc/csf/csf.conf ]]; then
         log "INFO" "CSF firewall detected"
 
         # Backup CSF config
-        cp /etc/csf/csf.conf "/etc/csf/csf.conf.backup.$(date +%Y%m%d)"
+        cp /etc/csf/csf.conf "/etc/csf/csf.conf.backup.$(date +%Y%m%d-%H%M%S)"
 
-        # Safely add UDP ports
-        for port_type in UDP_IN UDP_OUT; do
-            local current_value=$(grep "^${port_type} =" /etc/csf/csf.conf | cut -d'"' -f2)
+        # Add UDP ports safely
+        for port_type in "UDP_IN" "UDP_OUT"; do
+            local current=$(grep "^${port_type} =" /etc/csf/csf.conf | cut -d'"' -f2)
 
-            if [[ -z "${current_value}" ]]; then
+            if [[ -z "${current}" ]]; then
                 # Empty string case
                 sed -i "s/^${port_type} = \"\"/${port_type} = \"161\"/" /etc/csf/csf.conf
                 log "INFO" "Set ${port_type} to \"161\""
-            elif ! echo "${current_value}" | grep -q "161"; then
+            elif ! echo "${current}" | grep -q "161"; then
                 # Add to existing list
-                sed -i "s/^${port_type} = \"${current_value}\"/${port_type} = \"${current_value},161\"/" /etc/csf/csf.conf
+                sed -i "s/^${port_type} = \"${current}\"/${port_type} = \"${current},161\"/" /etc/csf/csf.conf
                 log "INFO" "Added 161 to ${port_type}"
             fi
         done
@@ -620,7 +742,7 @@ configure_firewall() {
         # Restart CSF
         csf -r >/dev/null 2>&1
         firewall_configured=true
-        log "SUCCESS" "CSF configured for SNMP"
+        log "SUCCESS" "CSF configured"
     fi
 
     # Firewalld
@@ -629,7 +751,7 @@ configure_firewall() {
         firewall-cmd --permanent --add-service=snmp
         firewall-cmd --reload >/dev/null
         firewall_configured=true
-        log "SUCCESS" "Firewalld configured for SNMP"
+        log "SUCCESS" "Firewalld configured"
     fi
 
     # UFW
@@ -637,26 +759,26 @@ configure_firewall() {
         log "INFO" "UFW detected"
         ufw allow snmp >/dev/null 2>&1
         firewall_configured=true
-        log "SUCCESS" "UFW configured for SNMP"
+        log "SUCCESS" "UFW configured"
     fi
 
     # iptables (fallback)
     if [[ "${firewall_configured}" == false ]] && command -v iptables >/dev/null 2>&1; then
-        log "INFO" "Configuring iptables for SNMP"
+        log "INFO" "Configuring iptables"
 
-        # Check if rules already exist
         if ! iptables -C INPUT -p udp --dport 161 -j ACCEPT 2>/dev/null; then
             iptables -A INPUT -p udp --dport 161 -s 127.0.0.1 -j ACCEPT
             iptables -A INPUT -p udp --dport 161 -m state --state NEW -j ACCEPT
             log "SUCCESS" "iptables rules added"
 
-            # Save rules based on OS
+            # Save rules
             if [[ -f /etc/redhat-release ]]; then
                 service iptables save >/dev/null 2>&1 || true
             elif [[ -f /etc/debian_version ]]; then
                 iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
             fi
         fi
+        firewall_configured=true
     fi
 
     if [[ "${firewall_configured}" == false ]]; then
@@ -675,13 +797,13 @@ create_directories() {
         "${MRTG_BIN}"
         "${MRTG_VAR}"
         "${BACKUP_DIR}"
-        "${WEB_ROOT}/mrtg"
+        "${WEB_MRTG_DIR}"
     )
 
     for dir in "${dirs[@]}"; do
         if [[ ! -d "${dir}" ]]; then
             if [[ "${DRY_RUN}" == true ]]; then
-                log "INFO" "Would create directory: ${dir}"
+                log "INFO" "Would create: ${dir}"
             else
                 mkdir -p "${dir}"
                 log "DEBUG" "Created: ${dir}"
@@ -690,12 +812,11 @@ create_directories() {
     done
 
     if [[ "${DRY_RUN}" != true ]]; then
-        # Set secure permissions
         chmod 755 "${MRTG_BASE}"
         chmod 750 "${MRTG_CONF}"
         chmod 755 "${MRTG_LOG}"
         chmod 755 "${MRTG_HTML}"
-        chmod 755 "${WEB_ROOT}/mrtg"
+        chmod 755 "${WEB_MRTG_DIR}"
     fi
 
     log "SUCCESS" "Directories created"
@@ -714,25 +835,15 @@ generate_mrtg_config() {
         return 0
     fi
 
-    # Wait for SNMP to be ready
-    local max_attempts=10
-    local attempt=1
-    while [[ $attempt -le $max_attempts ]]; do
-        if snmpget -v 2c -c "${SNMP_COMMUNITY}" -t 1 127.0.0.1 sysUpTime.0 >/dev/null 2>&1; then
-            log "INFO" "SNMP ready after ${attempt} seconds"
-            break
-        fi
-        log "DEBUG" "Waiting for SNMP (${attempt}/${max_attempts})..."
-        sleep 1
-        ((attempt++))
-    done
+    # Wait for SNMP
+    sleep 3
 
-    # Use cfgmaker with timeout and retry
+    # Try cfgmaker with retries
     local cfg_success=false
     for i in {1..3}; do
-        log "INFO" "Attempt ${i} to generate configuration..."
+        log "INFO" "Attempt ${i} to detect interfaces..."
         if timeout 30 ${cfgmaker_path} \
-            --global "WorkDir: ${WEB_ROOT}/mrtg" \
+            --global "WorkDir: ${WEB_MRTG_DIR}" \
             --global "Options[_]: growright, bits, nopercent" \
             --global "LogDir: ${MRTG_LOG}" \
             --global "RunAsDaemon: No" \
@@ -746,16 +857,16 @@ generate_mrtg_config() {
             if [[ -s "${cfg_file}.tmp" ]]; then
                 mv "${cfg_file}.tmp" "${cfg_file}"
                 cfg_success=true
-                log "SUCCESS" "Configuration generated successfully"
+                log "SUCCESS" "Configuration generated"
                 break
             fi
         fi
         sleep 2
     done
 
-    # Fallback to template if cfgmaker failed
+    # Fallback to template
     if [[ "${cfg_success}" != true ]]; then
-        log "WARNING" "cfgmaker failed, using template configuration"
+        log "WARNING" "Using template configuration"
         generate_template_config "${cfg_file}"
     fi
 
@@ -764,7 +875,6 @@ generate_mrtg_config() {
 
 ########################################################################
 # System Health Monitoring
-# Added by MRTG Professional Suite
 ########################################################################
 
 # CPU Load
@@ -805,9 +915,18 @@ ShortLegend[uptime]: secs
 YLegend[uptime]: Uptime (seconds)
 Options[uptime]: growright, noinfo, nopercent
 
+# System Processes
+Target[processes]: .1.3.6.1.2.1.25.1.6.0:${SNMP_COMMUNITY}@127.0.0.1:
+Title[processes]: System Processes
+PageTop[processes]: <h1>Running Processes</h1>
+MaxBytes[processes]: 1000
+ShortLegend[processes]: procs
+YLegend[processes]: Processes
+Options[processes]: growright, nopercent
+
 EOF
 
-    log "SUCCESS" "MRTG configuration complete"
+    log "SUCCESS" "Configuration saved to ${cfg_file}"
 }
 
 generate_template_config() {
@@ -820,11 +939,11 @@ generate_template_config() {
 ########################################################################
 # MRTG Template Configuration
 # Generated: $(date)
-# Interfaces detected: ${#interfaces[@]}
+# Interfaces: ${#interfaces[@]}
 ########################################################################
 
 # Global settings
-WorkDir: ${WEB_ROOT}/mrtg
+WorkDir: ${WEB_MRTG_DIR}
 LogDir: ${MRTG_LOG}
 Interval: ${INTERVAL}
 Options[_]: growright, bits
@@ -833,7 +952,7 @@ Language: english
 WriteExpires: Yes
 WithPeak[_]: wmy
 
-# Global HTML settings
+# Global HTML
 Title[^]: MRTG Network Monitor - $(hostname)
 PageTop[^]: <h1>MRTG Network Monitor - $(hostname)</h1>
 XSize[_]: 600
@@ -841,142 +960,124 @@ YSize[_]: 300
 
 EOF
 
-    # Add each interface with speed detection
+    # Add each interface
     for interface in "${interfaces[@]}"; do
-        # Detect interface speed
+        # Detect speed
         local speed=1000000  # Default 1Gbps in bytes
         if [[ -f "/sys/class/net/${interface}/speed" ]]; then
-            local detected_speed=$(cat "/sys/class/net/${interface}/speed" 2>/dev/null | grep -o '[0-9]*' || echo "1000")
-            speed=$((detected_speed * 1000000 / 8))
-        elif [[ -f "/sys/class/net/${interface}/device/speed" ]]; then
-            local detected_speed=$(cat "/sys/class/net/${interface}/device/speed" 2>/dev/null | grep -o '[0-9]*' || echo "1000")
-            speed=$((detected_speed * 1000000 / 8))
+            local detected=$(cat "/sys/class/net/${interface}/speed" 2>/dev/null | grep -o '[0-9]*' || echo "1000")
+            speed=$((detected * 1000000 / 8))
         fi
 
-        # Get interface description if available
-        local description="${interface}"
+        # Get description
+        local desc="${interface}"
         if command -v ethtool >/dev/null 2>&1; then
-            description=$(ethtool "${interface}" 2>/dev/null | grep "Description" | cut -d: -f2- | xargs || echo "${interface}")
+            desc=$(ethtool "${interface}" 2>/dev/null | grep "Description" | cut -d: -f2- | xargs || echo "${interface}")
         fi
 
         cat >> "${cfg_file}" << EOF
-# Interface: ${interface} - ${description}
+# Interface: ${interface}
 Target[${interface}]: ${interface}:${SNMP_COMMUNITY}@127.0.0.1:
 MaxBytes[${interface}]: ${speed}
-Title[${interface}]: Traffic Analysis for ${interface} - ${description}
-PageTop[${interface}]: <h1>Traffic Analysis for ${interface} - ${description}</h1>
+Title[${interface}]: Traffic Analysis for ${interface}
+PageTop[${interface}]: <h1>Traffic Analysis for ${interface}</h1>
 YLegend[${interface}]: Bits per second
 ShortLegend[${interface}]: b/s
-Legend1[${interface}]: Incoming Traffic (bits/sec)
-Legend2[${interface}]: Outgoing Traffic (bits/sec)
-Legend3[${interface}]: Max Incoming (bits/sec)
-Legend4[${interface}]: Max Outgoing (bits/sec)
+Legend1[${interface}]: Incoming Traffic
+Legend2[${interface}]: Outgoing Traffic
 WithPeak[${interface}]: wmy
 
 EOF
     done
-
-    log "SUCCESS" "Template configuration created"
 }
 
 setup_cron() {
-    log "INFO" "Setting up cron job (interval: ${INTERVAL} minutes)..."
+    log "INFO" "Setting up cron (interval: ${INTERVAL} minutes)..."
 
     if [[ "${DRY_RUN}" == true ]]; then
         log "INFO" "Would add cron: */${INTERVAL} * * * * ${MRTG_BIN}/run-mrtg.sh"
         return 0
     fi
 
-    # Create runner script with environment
+    # Create runner script
     cat > "${MRTG_BIN}/run-mrtg.sh" << 'EOF'
 #!/bin/bash
-# MRTG Runner Script - Generated by MRTG Professional Suite
-# This script runs MRTG and handles permissions
+# MRTG Runner - Generated by MRTG Professional Suite
 
-# Load environment
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
-# Configuration
-MRTG_CONF="/usr/local/mrtg/conf/mrtg.cfg"
-MRTG_LOG="/usr/local/mrtg/logs/mrtg.log"
-WEB_ROOT="'${WEB_ROOT}'"
-WEB_USER="'${WEB_USER}'"
-WEB_GROUP="'${WEB_GROUP}'"
+MRTG_CONF="'"${MRTG_CONF}"'"
+MRTG_LOG="'"${MRTG_LOG}"'"
+WEB_DIR="'"${WEB_MRTG_DIR}"'"
+WEB_USER="'"${WEB_USER}"'"
+WEB_GROUP="'"${WEB_GROUP}"'"
 
-# Function to log with timestamp
 log_message() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${MRTG_LOG}"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${MRTG_LOG}/cron.log"
 }
 
-# Run MRTG (3 passes to ensure rates are calculated)
+# Run MRTG (3 passes for rate calculation)
 for i in {1..3}; do
     log_message "MRTG run $i/3"
-    /usr/bin/mrtg "${MRTG_CONF}" --logging "${MRTG_LOG}" 2>&1 | while read line; do
+    /usr/bin/mrtg "${MRTG_CONF}/mrtg.cfg" --logging "${MRTG_LOG}/mrtg.log" 2>&1 | while read line; do
         log_message "MRTG: $line"
     done
     sleep 1
 done
 
 # Generate index
-log_message "Generating index page"
-/usr/bin/indexmaker "${MRTG_CONF}" --output="${WEB_ROOT}/mrtg/index.html"
+log_message "Generating index"
+/usr/bin/indexmaker "${MRTG_CONF}/mrtg.cfg" --output="${WEB_DIR}/index.html"
 
 # Set permissions
-log_message "Setting permissions"
-chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_ROOT}/mrtg" 2>/dev/null || true
-chmod -R 755 "${WEB_ROOT}/mrtg" 2>/dev/null || true
+chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_DIR}" 2>/dev/null || true
+chmod -R 755 "${WEB_DIR}" 2>/dev/null || true
 
 log_message "Cron run completed"
 EOF
 
     chmod +x "${MRTG_BIN}/run-mrtg.sh"
 
-    # Remove existing MRTG cron entries
+    # Remove old cron entries
     crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab -
 
-    # Add new cron with comment for easy identification
+    # Add new cron
     (crontab -l 2>/dev/null || true; echo "# MRTG Monitoring - Added by MRTG Professional Suite v${SCRIPT_VERSION}") | crontab -
     (crontab -l 2>/dev/null; echo "*/${INTERVAL} * * * * ${MRTG_BIN}/run-mrtg.sh >/dev/null 2>&1") | crontab -
 
-    log "SUCCESS" "Cron job installed"
+    log "SUCCESS" "Cron installed"
 }
 
 setup_web_access() {
     log "INFO" "Configuring web access..."
 
     if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would configure web access for ${WEB_SERVER}"
+        log "INFO" "Would configure web access"
         return 0
     fi
 
-    # Create symbolic link if needed
-    if [[ "${WEB_ROOT}/mrtg" != "${MRTG_HTML}" ]]; then
-        ln -sfn "${WEB_ROOT}/mrtg" "${MRTG_HTML}"
+    # Create symbolic link
+    if [[ "${WEB_MRTG_DIR}" != "${MRTG_HTML}" ]]; then
+        ln -sfn "${WEB_MRTG_DIR}" "${MRTG_HTML}"
     fi
 
     # Create .htaccess for Apache/LiteSpeed
     if [[ "${WEB_SERVER}" == "apache" ]] || [[ "${WEB_SERVER}" == "litespeed" ]] || [[ "${WEB_SERVER}" == "openlitespeed" ]]; then
-        cat > "${WEB_ROOT}/mrtg/.htaccess" << EOF
+        cat > "${WEB_MRTG_DIR}/.htaccess" << EOF
 # MRTG Access Control
 # Generated: $(date)
 
-# Restrict access by default
 Order Deny,Allow
 Deny from all
 Allow from 127.0.0.1
 Allow from ::1
 
-# Allow local network (adjust as needed)
+# Allow local network (uncomment if needed)
 # Allow from 192.168.0.0/16
 # Allow from 10.0.0.0/8
-
-# Password protection (uncomment and configure if needed)
-# AuthType Basic
-# AuthName "MRTG Network Monitor"
-# AuthUserFile /etc/mrtg/.htpasswd
-# Require valid-user
+# Allow from 172.16.0.0/12
 
 <FilesMatch "\.(png|gif|jpg|jpeg|css|js)$">
     Order Allow,Deny
@@ -986,54 +1087,14 @@ EOF
     fi
 
     # Create robots.txt
-    cat > "${WEB_ROOT}/mrtg/robots.txt" << EOF
+    cat > "${WEB_MRTG_DIR}/robots.txt" << EOF
 User-agent: *
 Disallow: /
 EOF
 
-    # Create simple index if none exists
-    if [[ ! -f "${WEB_ROOT}/mrtg/index.html" ]]; then
-        cat > "${WEB_ROOT}/mrtg/index.html" << EOF
-<!DOCTYPE html>
-<html>
-<head>
-    <title>MRTG Network Monitor</title>
-    <meta http-equiv="refresh" content="300">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        .header { background: #333; color: white; padding: 20px; margin-bottom: 20px; border-radius: 5px; }
-        .content { background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        .info { background: #e8f4fd; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
-        h1 { margin: 0; font-size: 24px; }
-        h2 { color: #333; font-size: 18px; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>MRTG Network Monitor</h1>
-    </div>
-    <div class="content">
-        <div class="info">
-            <h2>Monitoring Status</h2>
-            <p>Initializing monitoring data... Please wait 5-10 minutes for graphs to appear.</p>
-            <p>Server: $(hostname) | Date: $(date)</p>
-        </div>
-        <p>If graphs don't appear after 10 minutes, check:</p>
-        <ul>
-            <li>SNMP service is running: <code>systemctl status snmpd</code></li>
-            <li>Firewall allows UDP port 161</li>
-            <li>File permissions: <code>${WEB_ROOT}/mrtg</code></li>
-            <li>MRTG logs: <code>${MRTG_LOG}/mrtg.log</code></li>
-        </ul>
-    </div>
-</body>
-</html>
-EOF
-    fi
-
     # Set permissions
-    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_ROOT}/mrtg" 2>/dev/null || true
-    chmod -R 755 "${WEB_ROOT}/mrtg" 2>/dev/null || true
+    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
+    chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
 
     log "SUCCESS" "Web access configured"
 }
@@ -1052,13 +1113,12 @@ configure_panel_integration() {
 
             mkdir -p "${mrtg_plugin}/admin"
             mkdir -p "${mrtg_plugin}/data"
-            mkdir -p "${mrtg_plugin}/hooks"
 
-            # Plugin configuration
+            # Plugin config
             cat > "${mrtg_plugin}/plugin.conf" << EOF
 name=MRTG Network Monitor
 version=${SCRIPT_VERSION}
-desc=Enterprise-grade network traffic monitoring and bandwidth graphing
+desc=Enterprise network monitoring and bandwidth graphing
 url=/plugins/mrtg-monitor/admin/
 icon=graph.png
 level=admin
@@ -1072,12 +1132,10 @@ EOF
     <title>MRTG Network Monitor</title>
     <meta http-equiv="refresh" content="300">
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f0f0f0; }
-        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; margin-bottom: 20px; border-radius: 5px; }
-        .graph-container { background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { margin: 0; font-size: 24px; }
-        h2 { color: #333; margin-top: 0; }
-        iframe { border: 1px solid #ddd; border-radius: 5px; background: white; }
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
+        .content { background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        iframe { border: 1px solid #ddd; border-radius: 5px; background: white; width: 100%; height: 800px; }
     </style>
 </head>
 <body>
@@ -1085,9 +1143,8 @@ EOF
         <h1>MRTG Network Monitor</h1>
         <p>DirectAdmin Integration | Version ${SCRIPT_VERSION}</p>
     </div>
-    <div class="graph-container">
-        <h2>Network Traffic Graphs</h2>
-        <iframe src="/mrtg/" width="100%" height="800" frameborder="0"></iframe>
+    <div class="content">
+        <iframe src="/mrtg/" frameborder="0"></iframe>
     </div>
 </body>
 </html>
@@ -1102,18 +1159,16 @@ EOF
             ;;
 
         "cpanel")
-            # Create symlink in cPanel's webroot
             if [[ -d "/usr/local/apache/htdocs" ]]; then
-                ln -sfn "${WEB_ROOT}/mrtg" "/usr/local/apache/htdocs/mrtg"
-                log "SUCCESS" "cPanel symlink created"
+                ln -sfn "${WEB_MRTG_DIR}" "/usr/local/apache/htdocs/mrtg"
+                log "SUCCESS" "cPanel integration configured"
             fi
             ;;
 
         "plesk")
-            # Add to Plesk default vhost
             if [[ -d "/var/www/vhosts/default/htdocs" ]]; then
-                ln -sfn "${WEB_ROOT}/mrtg" "/var/www/vhosts/default/htdocs/mrtg"
-                log "SUCCESS" "Plesk symlink created"
+                ln -sfn "${WEB_MRTG_DIR}" "/var/www/vhosts/default/htdocs/mrtg"
+                log "SUCCESS" "Plesk integration configured"
             fi
             ;;
     esac
@@ -1123,15 +1178,12 @@ initialize_mrtg() {
     log "INFO" "Initializing MRTG data collection..."
 
     if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would run MRTG 3 times to initialize data"
+        log "INFO" "Would run MRTG 3 times"
         return 0
     fi
 
     local mrtg_path=$(command -v mrtg || echo "/usr/bin/mrtg")
     local cfg_file="${MRTG_CONF}/mrtg.cfg"
-
-    # Ensure directories exist
-    mkdir -p "${MRTG_LOG}" "${WEB_ROOT}/mrtg"
 
     # 3-pass warmup
     for i in {1..3}; do
@@ -1142,11 +1194,11 @@ initialize_mrtg() {
 
     # Generate index
     local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
-    ${indexmaker_path} "${cfg_file}" --output="${WEB_ROOT}/mrtg/index.html"
+    ${indexmaker_path} "${cfg_file}" --output="${WEB_MRTG_DIR}/index.html"
 
     # Set permissions
-    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_ROOT}/mrtg" 2>/dev/null || true
-    chmod -R 755 "${WEB_ROOT}/mrtg" 2>/dev/null || true
+    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
+    chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
 
     log "SUCCESS" "Initialization complete"
 }
@@ -1156,7 +1208,7 @@ initialize_mrtg() {
 # =============================================================================
 
 verify_system_health() {
-    log "INFO" "Running comprehensive system health check..."
+    log "INFO" "Running comprehensive health check..."
 
     local errors=0
     local warnings=0
@@ -1165,8 +1217,8 @@ verify_system_health() {
     echo -e "${BOLD}              MRTG SYSTEM HEALTH DIAGNOSTIC${NC}"
     echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}\n"
 
-    # 1. Check MRTG Installation
-    echo -e "${BOLD}1. MRTG Installation${NC}"
+    # 1. Installation Check
+    echo -e "${BOLD}1. Installation${NC}"
     if [[ -d "${MRTG_BASE}" ]]; then
         echo -e "  ${GREEN}✓${NC} MRTG base directory: ${MRTG_BASE}"
     else
@@ -1181,36 +1233,36 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # 2. Check SNMP Service
+    # 2. SNMP Service
     echo -e "\n${BOLD}2. SNMP Service${NC}"
     if systemctl is-active --quiet snmpd 2>/dev/null || service snmpd status 2>/dev/null | grep -q "running"; then
-        echo -e "  ${GREEN}✓${NC} SNMP service is running"
+        echo -e "  ${GREEN}✓${NC} SNMP service running"
     else
         echo -e "  ${RED}✗${NC} SNMP service not running"
         ((errors++))
     fi
 
-    # Test SNMP response
+    # Test SNMP
     if command -v snmpget >/dev/null 2>&1; then
         if snmpget -v 2c -c "${SNMP_COMMUNITY}" -t 2 127.0.0.1 sysUpTime.0 >/dev/null 2>&1; then
-            echo -e "  ${GREEN}✓${NC} SNMP responding correctly"
+            echo -e "  ${GREEN}✓${NC} SNMP responding"
         else
             echo -e "  ${RED}✗${NC} SNMP not responding - check community string"
             ((errors++))
         fi
     fi
 
-    # 3. Check Cron
+    # 3. Cron
     echo -e "\n${BOLD}3. Scheduled Tasks${NC}"
     if crontab -l 2>/dev/null | grep -q "run-mrtg.sh"; then
         local cron_line=$(crontab -l 2>/dev/null | grep "run-mrtg.sh" | head -1)
-        echo -e "  ${GREEN}✓${NC} Cron job found: ${cron_line}"
+        echo -e "  ${GREEN}✓${NC} Cron job: ${cron_line}"
     else
-        echo -e "  ${RED}✗${NC} No MRTG cron job found"
+        echo -e "  ${RED}✗${NC} No cron job found"
         ((errors++))
     fi
 
-    # 4. Check Data Collection
+    # 4. Data Collection
     echo -e "\n${BOLD}4. Data Collection${NC}"
     if [[ -f "${MRTG_LOG}/mrtg.log" ]]; then
         local log_size=$(stat -c%s "${MRTG_LOG}/mrtg.log" 2>/dev/null || stat -f%z "${MRTG_LOG}/mrtg.log" 2>/dev/null)
@@ -1218,114 +1270,75 @@ verify_system_health() {
         local current_time=$(date +%s)
         local minutes_ago=$(( (current_time - last_mod) / 60 ))
 
-        echo -e "  ${GREEN}✓${NC} Log file size: $(numfmt --to=iec ${log_size} 2>/dev/null || echo "${log_size} bytes")"
+        echo -e "  ${GREEN}✓${NC} Log size: $(numfmt --to=iec ${log_size} 2>/dev/null || echo "${log_size} bytes")"
 
         if [[ ${minutes_ago} -le 10 ]]; then
             echo -e "  ${GREEN}✓${NC} Last update: ${minutes_ago} minutes ago"
         else
-            echo -e "  ${YELLOW}⚠${NC} Last update: ${minutes_ago} minutes ago (may be stale)"
+            echo -e "  ${YELLOW}⚠${NC} Last update: ${minutes_ago} minutes ago (stale)"
             ((warnings++))
         fi
     else
-        echo -e "  ${RED}✗${NC} No log file found"
+        echo -e "  ${RED}✗${NC} No log file"
         ((errors++))
     fi
 
-    # 5. Check Web Output
+    # 5. Web Interface
     echo -e "\n${BOLD}5. Web Interface${NC}"
-    if [[ -d "${WEB_ROOT}/mrtg" ]]; then
-        echo -e "  ${GREEN}✓${NC} Web directory exists: ${WEB_ROOT}/mrtg"
+    if [[ -d "${WEB_MRTG_DIR}" ]]; then
+        echo -e "  ${GREEN}✓${NC} Web directory exists"
 
-        local image_count=$(find "${WEB_ROOT}/mrtg" -name "*.png" 2>/dev/null | wc -l)
+        local image_count=$(find "${WEB_MRTG_DIR}" -name "*.png" 2>/dev/null | wc -l)
         if [[ ${image_count} -gt 0 ]]; then
-            echo -e "  ${GREEN}✓${NC} Found ${image_count} graph images"
+            echo -e "  ${GREEN}✓${NC} Found ${image_count} graphs"
         else
-            echo -e "  ${YELLOW}⚠${NC} No graph images found (waiting for first run)"
+            echo -e "  ${YELLOW}⚠${NC} No graphs yet"
             ((warnings++))
         fi
 
-        if [[ -f "${WEB_ROOT}/mrtg/index.html" ]]; then
+        if [[ -f "${WEB_MRTG_DIR}/index.html" ]]; then
             echo -e "  ${GREEN}✓${NC} Index page exists"
         else
-            echo -e "  ${YELLOW}⚠${NC} Index page missing"
+            echo -e "  ${YELLOW}⚠${NC} Index missing"
             ((warnings++))
-        fi
-
-        # Check permissions
-        if [[ -w "${WEB_ROOT}/mrtg" ]]; then
-            echo -e "  ${GREEN}✓${NC} Directory is writable"
-        else
-            echo -e "  ${RED}✗${NC} Directory not writable"
-            ((errors++))
         fi
     else
         echo -e "  ${RED}✗${NC} Web directory missing"
         ((errors++))
     fi
 
-    # 6. Check Network Interfaces
+    # 6. Network Interfaces
     echo -e "\n${BOLD}6. Network Interfaces${NC}"
     local interfaces=($(detect_network_interfaces))
-    echo -e "  ${GREEN}✓${NC} Detected ${#interfaces[@]} active interfaces"
+    echo -e "  ${GREEN}✓${NC} Detected ${#interfaces[@]} interfaces"
     for interface in "${interfaces[@]}"; do
-        if [[ -f "${WEB_ROOT}/mrtg/${interface}.html" ]]; then
-            echo -e "  ${GREEN}  ✓ ${interface}: monitoring active"
+        if [[ -f "${WEB_MRTG_DIR}/${interface}.html" ]]; then
+            echo -e "  ${GREEN}  ✓ ${interface}: active"
         else
-            echo -e "  ${YELLOW}  ○ ${interface}: waiting for data"
+            echo -e "  ${YELLOW}  ○ ${interface}: waiting"
         fi
     done
 
-    # 7. Firewall Status
-    echo -e "\n${BOLD}7. Firewall Configuration${NC}"
-    if command -v csf >/dev/null 2>&1 && [[ -f /etc/csf/csf.conf ]]; then
-        if grep -q "161" /etc/csf/csf.conf; then
-            echo -e "  ${GREEN}✓${NC} CSF allows SNMP (port 161)"
-        else
-            echo -e "  ${YELLOW}⚠${NC} CSF may block SNMP - port 161 not found"
-            ((warnings++))
-        fi
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        if firewall-cmd --list-services 2>/dev/null | grep -q "snmp"; then
-            echo -e "  ${GREEN}✓${NC} Firewalld allows SNMP"
-        else
-            echo -e "  ${YELLOW}⚠${NC} SNMP service not enabled in firewalld"
-            ((warnings++))
-        fi
-    elif command -v ufw >/dev/null 2>&1; then
-        if ufw status | grep -q "161"; then
-            echo -e "  ${GREEN}✓${NC} UFW allows SNMP"
-        else
-            echo -e "  ${YELLOW}⚠${NC} UFW may block SNMP"
-            ((warnings++))
-        fi
-    else
-        echo -e "  ${YELLOW}⚠${NC} No firewall detected or unknown type"
-    fi
-
     # Summary
     echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}DIAGNOSTIC SUMMARY${NC}"
+    echo -e "${BOLD}SUMMARY${NC}"
     echo -e "  Errors: ${errors}   Warnings: ${warnings}"
 
     if [[ ${errors} -eq 0 && ${warnings} -eq 0 ]]; then
         echo -e "\n${GREEN}${BOLD}✓ SYSTEM HEALTH: PERFECT${NC}"
-        echo -e "${GREEN}All systems operational${NC}"
     elif [[ ${errors} -eq 0 && ${warnings} -gt 0 ]]; then
         echo -e "\n${YELLOW}${BOLD}⚠ SYSTEM HEALTH: GOOD WITH WARNINGS${NC}"
-        echo -e "${YELLOW}Address warnings for optimal performance${NC}"
     else
         echo -e "\n${RED}${BOLD}✗ SYSTEM HEALTH: ISSUES DETECTED${NC}"
-        echo -e "${RED}Please fix the ${errors} error(s) above${NC}"
     fi
 
     echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}\n"
 
-    # Return error count for scripting
     return ${errors}
 }
 
 repair_installation() {
-    log "INFO" "Attempting to repair MRTG installation..."
+    log "INFO" "Attempting repair..."
 
     if [[ "${DRY_RUN}" == true ]]; then
         log "INFO" "Would attempt repair"
@@ -1335,50 +1348,33 @@ repair_installation() {
     # Backup first
     backup_config
 
-    # Restart SNMP with proper configuration
-    log "INFO" "Restarting SNMP service..."
-    if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
-        systemctl unmask snmpd >/dev/null 2>&1 || true
-        systemctl enable snmpd >/dev/null 2>&1 || true
-        systemctl restart snmpd
-    else
-        service snmpd restart
-    fi
+    # Restart SNMP
+    log "INFO" "Restarting SNMP..."
+    systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
     sleep 3
 
-    # Verify SNMP community
-    if [[ -z "${SNMP_COMMUNITY}" ]]; then
-        if [[ -f "${MRTG_CONF}/install.conf" ]]; then
-            source "${MRTG_CONF}/install.conf"
-        fi
-    fi
-
     # Regenerate config
-    log "INFO" "Regenerating MRTG configuration..."
     generate_mrtg_config
 
     # Reinitialize
     initialize_mrtg
 
-    # Check cron
+    # Fix cron
     if ! crontab -l 2>/dev/null | grep -q "run-mrtg.sh"; then
-        log "INFO" "Reinstalling cron job..."
         setup_cron
     fi
 
     # Fix permissions
-    log "INFO" "Fixing permissions..."
-    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_ROOT}/mrtg" 2>/dev/null || true
-    chmod -R 755 "${WEB_ROOT}/mrtg" 2>/dev/null || true
+    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
+    chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
 
-    log "SUCCESS" "Repair attempt completed"
+    log "SUCCESS" "Repair completed"
 
-    # Run health check
     verify_system_health
 }
 
 # =============================================================================
-# BACKUP AND RESTORE FUNCTIONS
+# BACKUP FUNCTIONS
 # =============================================================================
 
 backup_config() {
@@ -1393,7 +1389,7 @@ backup_config() {
 
     mkdir -p "${BACKUP_DIR}"
 
-    # Create backup of all important files
+    # Backup configuration
     tar -czf "${backup_file}" \
         --exclude="${MRTG_LOG}/*" \
         --exclude="${MRTG_VAR}/*" \
@@ -1402,16 +1398,17 @@ backup_config() {
         /etc/snmp/snmpd.conf \
         2>/dev/null || true
 
-    # Save installation info
+    # Save info
     cat > "${BACKUP_DIR}/install-info.txt" << EOF
-MRTG Installation Backup
+MRTG Backup
 Date: $(date)
 Version: ${SCRIPT_VERSION}
 Web Server: ${WEB_SERVER}
 Web User: ${WEB_USER}
 Web Root: ${WEB_ROOT}
-SNMP Community: ${SNMP_COMMUNITY}
+SNMP: ${SNMP_COMMUNITY}
 Panel: ${PANEL_TYPE}
+Interval: ${INTERVAL}
 EOF
 
     log "SUCCESS" "Backup created: ${backup_file}"
@@ -1424,7 +1421,7 @@ restore_config() {
     local backups=($(ls -1 "${BACKUP_DIR}"/*.tar.gz 2>/dev/null))
 
     if [[ ${#backups[@]} -eq 0 ]]; then
-        log "ERROR" "No backups found in ${BACKUP_DIR}"
+        log "ERROR" "No backups found"
         return 1
     fi
 
@@ -1446,13 +1443,13 @@ restore_config() {
     if confirm_action "Restore from $(basename "${selected}")? This will overwrite current configuration."; then
         log "INFO" "Restoring from: ${selected}"
 
-        # Backup current config first
+        # Backup current
         backup_config
 
-        # Stop cron temporarily
+        # Stop cron
         crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | crontab -
 
-        # Restore files
+        # Restore
         tar -xzf "${selected}" -C /
 
         # Restart services
@@ -1470,34 +1467,33 @@ restore_config() {
 # =============================================================================
 
 uninstall_mrtg() {
-    log "INFO" "Starting uninstallation process..."
+    log "INFO" "Starting uninstall..."
 
     if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would perform complete uninstall"
+        log "INFO" "Would perform uninstall"
         return 0
     fi
 
     if [[ "${FORCE_MODE}" != true ]]; then
         echo -e "${RED}${BOLD}WARNING: This will remove MRTG and all configurations${NC}"
-        echo -e "The following will be affected:"
-        echo -e "  - ${MRTG_BASE} (MRTG installation)"
-        echo -e "  - ${WEB_ROOT}/mrtg (Web files)"
-        echo -e "  - /etc/snmp/snmpd.conf (SNMP config)"
+        echo -e "Affected:"
+        echo -e "  - ${MRTG_BASE}"
+        echo -e "  - ${WEB_MRTG_DIR}"
+        echo -e "  - /etc/snmp/snmpd.conf"
         echo -e "  - MRTG cron jobs"
-        echo -e "  - DirectAdmin plugin (if installed)"
         echo ""
 
-        if ! confirm_action "Are you sure you want to continue?"; then
+        if ! confirm_action "Continue with uninstall?"; then
             log "INFO" "Uninstall cancelled"
             return 0
         fi
     fi
 
-    # Create backup before uninstall
+    # Backup
     backup_config
 
-    # Remove cron jobs
-    log "INFO" "Removing cron jobs..."
+    # Remove cron
+    log "INFO" "Removing cron..."
     crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab -
 
     # Remove DirectAdmin plugin
@@ -1506,7 +1502,7 @@ uninstall_mrtg() {
         rm -rf "/usr/local/directadmin/plugins/mrtg-monitor"
     fi
 
-    # Ask about packages
+    # Remove packages?
     if confirm_action "Remove MRTG and SNMP packages?"; then
         log "INFO" "Removing packages..."
         case "${OS_ID}" in
@@ -1519,16 +1515,16 @@ uninstall_mrtg() {
         esac
     fi
 
-    # Ask about data
-    if confirm_action "Remove all MRTG data and configurations?"; then
-        log "INFO" "Removing MRTG files..."
+    # Remove data?
+    if confirm_action "Remove all MRTG data?"; then
+        log "INFO" "Removing files..."
         rm -rf "${MRTG_BASE}"
         rm -rf "${MRTG_VAR}"
-        rm -rf "${WEB_ROOT}/mrtg"
+        rm -rf "${WEB_MRTG_DIR}"
 
-        # Restore original SNMP config if exists
+        # Restore SNMP config?
         local snmp_backup=$(ls -1 /etc/snmp/snmpd.conf.backup.* 2>/dev/null | head -1)
-        if [[ -n "${snmp_backup}" ]] && confirm_action "Restore original SNMP configuration?"; then
+        if [[ -n "${snmp_backup}" ]] && confirm_action "Restore original SNMP config?"; then
             cp "${snmp_backup}" /etc/snmp/snmpd.conf
             systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
         fi
@@ -1552,45 +1548,35 @@ installation_wizard() {
 ╚███╔███╔╝██║  ██║███████╗███████╗    ██║███████╗██║  ██║
  ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝    ╚═╝╚══════╝╚═╝  ╚═╝
 ================================================================================
-                    PROFESSIONAL MONITORING SUITE
-================================================================================
-Version: ${SCRIPT_VERSION} | Author: ${SCRIPT_AUTHOR}
-GitHub: ${SCRIPT_URL}
+                 PROFESSIONAL MONITORING SUITE v${SCRIPT_VERSION}
 ================================================================================
 
 This installer will:
-  ✓ Detect your existing web server (Apache/Nginx/LiteSpeed)
-  ✓ Configure SNMP with secure community string
-  ✓ Set up MRTG for network monitoring
-  ✓ Integrate with your control panel (if detected)
-  ✓ NEVER install or modify your web server
+  ✓ Detect your existing web server
+  ✓ Configure secure SNMP monitoring
+  ✓ Set up automatic data collection
+  ✓ Integrate with your control panel
+  ✓ NEVER modify your web server
 
 EOF
 
-    # Check root
     check_root
-
-    # Acquire lock
     acquire_lock
-
-    # Detect system
     detect_os
     detect_control_panel
     detect_web_server
 
-    # Show detected configuration
     echo -e "\n${BOLD}Detected Configuration:${NC}"
     echo -e "  OS: ${GREEN}${OS_NAME} ${OS_VERSION}${NC}"
     echo -e "  Web Server: ${GREEN}${WEB_SERVER}${NC}"
     echo -e "  Web User: ${GREEN}${WEB_USER}${NC}"
-    echo -e "  Web Root: ${GREEN}${WEB_ROOT}${NC}"
+    echo -e "  Web Directory: ${GREEN}${WEB_MRTG_DIR}${NC}"
 
     if [[ "${PANEL_TYPE}" != "none" ]]; then
         echo -e "  Control Panel: ${GREEN}${PANEL_TYPE}${NC}"
     fi
 
-    # Get user input
-    echo -e "\n${BOLD}Configuration Options:${NC}"
+    echo -e "\n${BOLD}Configuration:${NC}"
     read -p "Monitoring interval in minutes [${DEFAULT_INTERVAL}]: " interval
     INTERVAL=${interval:-${DEFAULT_INTERVAL}}
 
@@ -1600,12 +1586,10 @@ EOF
     read -p "Notification email [${DEFAULT_EMAIL}]: " email_input
     DEFAULT_EMAIL=${email_input:-${DEFAULT_EMAIL}}
 
-    # Show summary
-    echo -e "\n${YELLOW}Installation Summary:${NC}"
+    echo -e "\n${YELLOW}Summary:${NC}"
     echo -e "  Interval: ${INTERVAL} minutes"
     echo -e "  SNMP: ${SNMP_COMMUNITY:-"<auto-generated>"}"
     echo -e "  Email: ${DEFAULT_EMAIL}"
-    echo -e "  Web Directory: ${WEB_ROOT}/mrtg"
     echo ""
 
     if ! confirm_action "Proceed with installation?"; then
@@ -1613,7 +1597,6 @@ EOF
         return 0
     fi
 
-    # Run installation steps
     log "INFO" "Starting installation..."
 
     install_dependencies
@@ -1626,7 +1609,7 @@ EOF
     setup_cron
     initialize_mrtg
 
-    # Save installation config
+    # Save config
     cat > "${MRTG_CONF}/install.conf" << EOF
 # MRTG Installation Configuration
 # Generated: $(date)
@@ -1644,22 +1627,16 @@ EOF
 
     log "SUCCESS" "Installation completed!"
 
-    # Show access information
     local server_ip=$(detect_ip_address)
     echo -e "\n${GREEN}${BOLD}═══════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}${BOLD}                    INSTALLATION COMPLETE${NC}"
     echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════${NC}\n"
 
     echo -e "Access MRTG: ${BLUE}http://${server_ip}/mrtg/${NC}"
-    echo -e "SNMP Community: ${YELLOW}${SNMP_COMMUNITY}${NC} ${RED}(keep this secure!)${NC}"
+    echo -e "SNMP Community: ${YELLOW}${SNMP_COMMUNITY}${NC} (keep secure!)"
     echo -e "Configuration: ${CYAN}${MRTG_CONF}/mrtg.cfg${NC}"
-    echo -e "Logs: ${CYAN}${MRTG_LOG}/mrtg.log${NC}"
-    echo -e "Cron: ${CYAN}*/${INTERVAL} * * * *${NC}\n"
+    echo -e "Logs: ${CYAN}${MRTG_LOG}/mrtg.log${NC}\n"
 
-    echo -e "To check status: ${CYAN}${SCRIPT_NAME} --status${NC}"
-    echo -e "To uninstall: ${CYAN}${SCRIPT_NAME} --uninstall${NC}\n"
-
-    # Run health check
     verify_system_health
 }
 
@@ -1673,28 +1650,27 @@ show_menu() {
 ================================================================================
                     MRTG PROFESSIONAL MONITORING SUITE
 ================================================================================
-Version: ${SCRIPT_VERSION} | Enterprise Edition
+                         Enterprise Edition v${SCRIPT_VERSION}
 ================================================================================
 
 EOF
 
     echo -e "${BOLD}MAIN MENU${NC}\n"
 
-    echo -e "  ${GREEN}1)${NC} Install MRTG (Full installation wizard)"
+    echo -e "  ${GREEN}1)${NC} Install MRTG (Full wizard)"
     echo -e "  ${GREEN}2)${NC} Uninstall MRTG"
     echo -e "  ${GREEN}3)${NC} Run Health Check"
     echo -e "  ${GREEN}4)${NC} Repair Installation"
     echo -e "  ${GREEN}5)${NC} Backup Configuration"
     echo -e "  ${GREEN}6)${NC} Restore from Backup"
-    echo -e "  ${GREEN}7)${NC} Add/Update Cron Job"
-    echo -e "  ${GREEN}8)${NC} Remove Cron Job"
-    echo -e "  ${GREEN}9)${NC} View Logs"
-    echo -e "  ${GREEN}10)${NC} Regenerate Index Page"
-    echo -e "  ${GREEN}11)${NC} Test Configuration"
-    echo -e "  ${GREEN}12)${NC} Dry Run (Test Mode)"
+    echo -e "  ${GREEN}7)${NC} Update Script"
+    echo -e "  ${GREEN}8)${NC} Add/Update Cron"
+    echo -e "  ${GREEN}9)${NC} Remove Cron"
+    echo -e "  ${GREEN}10)${NC} View Logs"
+    echo -e "  ${GREEN}11)${NC} Dry Run (Test Mode)"
     echo -e "  ${GREEN}0)${NC} Exit\n"
 
-    read -p "Enter your choice [0-12]: " choice
+    read -p "Enter choice [0-11]: " choice
 
     case ${choice} in
         1) installation_wizard ;;
@@ -1709,45 +1685,28 @@ EOF
             ;;
         5) backup_config ;;
         6) restore_config ;;
-        7)
+        7) self_update ;;
+        8)
             detect_web_server
             read -p "Interval in minutes [${DEFAULT_INTERVAL}]: " interval
             INTERVAL=${interval:-${DEFAULT_INTERVAL}}
             setup_cron
             ;;
-        8)
-            if confirm_action "Remove MRTG cron job?"; then
-                crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab -
-                log "SUCCESS" "Cron job removed"
-            fi
-            ;;
         9)
-            if [[ -f "${MRTG_LOG}/mrtg.log" ]]; then
-                tail -50 "${MRTG_LOG}/mrtg.log"
-            else
-                log "ERROR" "Log file not found"
+            if confirm_action "Remove MRTG cron?"; then
+                crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab -
+                log "SUCCESS" "Cron removed"
             fi
             ;;
         10)
-            if [[ -f "${MRTG_CONF}/mrtg.cfg" ]]; then
-                detect_web_server
-                indexmaker "${MRTG_CONF}/mrtg.cfg" --output="${WEB_ROOT}/mrtg/index.html"
-                chown "${WEB_USER}:${WEB_GROUP}" "${WEB_ROOT}/mrtg/index.html" 2>/dev/null || true
-                log "SUCCESS" "Index page regenerated"
+            if [[ -f "${MRTG_LOG}/mrtg.log" ]]; then
+                tail -50 "${MRTG_LOG}/mrtg.log"
             else
-                log "ERROR" "Configuration not found"
+                log "ERROR" "Log not found"
             fi
             ;;
         11)
-            if [[ -f "${MRTG_CONF}/mrtg.cfg" ]]; then
-                env LANG=C mrtg "${MRTG_CONF}/mrtg.cfg" --check
-            else
-                log "ERROR" "Configuration not found"
-            fi
-            ;;
-        12)
             DRY_RUN=true
-            log "INFO" "Running in DRY RUN mode - no changes will be made"
             installation_wizard
             DRY_RUN=false
             ;;
@@ -1777,47 +1736,41 @@ ${BOLD}NAME${NC}
 ${BOLD}SYNOPSIS${NC}
     ${SCRIPT_NAME} [OPTIONS]
 
-${BOLD}DESCRIPTION${NC}
-    Enterprise-grade MRTG installer for hosting environments. Detects and works
-    with existing web servers and control panels without modifying them.
-
 ${BOLD}OPTIONS${NC}
     --install, -i     Run installation wizard
-    --uninstall, -u   Complete removal with backup
-    --status, -s      Full system health check
-    --repair, -r      Attempt to repair broken installation
-    --backup, -b      Backup current configuration
+    --uninstall, -u   Complete removal
+    --status, -s      Health check
+    --repair, -r      Fix common issues
+    --backup, -b      Backup configuration
     --restore, -R     Restore from backup
-    --dry-run         Test without making changes
-    --force           Skip confirmations (use with caution)
-    --version, -v     Show version information
-    --help, -h        Show this help message
+    --update, -U      Self-update from GitHub
+    --dry-run         Test without changes
+    --force           Skip confirmations
+    --version, -v     Show version
+    --help, -h        Show this help
 
 ${BOLD}EXAMPLES${NC}
-    ${SCRIPT_NAME} --install           # Interactive installation
-    ${SCRIPT_NAME} --status            # Check system health
-    ${SCRIPT_NAME} --repair            # Fix common issues
-    ${SCRIPT_NAME} --uninstall         # Remove MRTG completely
-    ${SCRIPT_NAME} --dry-run            # Test without changes
+    ${SCRIPT_NAME} --install      # Install MRTG
+    ${SCRIPT_NAME} --status       # Check health
+    ${SCRIPT_NAME} --repair       # Fix issues
+    ${SCRIPT_NAME} --update       # Update script
+    ${SCRIPT_NAME} --uninstall    # Remove MRTG
 
 ${BOLD}FILES${NC}
-    ${MRTG_BASE}              Main installation directory
-    ${MRTG_CONF}              Configuration files
-    ${MRTG_LOG}               Log files
-    ${BACKUP_DIR}             Backup directory
+    ${MRTG_BASE}         Installation
+    ${MRTG_CONF}         Configuration
+    ${MRTG_LOG}          Log files
+    ${BACKUP_DIR}        Backups
 
 ${BOLD}AUTHOR${NC}
     Written by ${SCRIPT_AUTHOR}
-    GitHub: ${SCRIPT_URL}
-
-${BOLD}REPORTING BUGS${NC}
-    ${SCRIPT_URL}/issues
+    GitHub: https://github.com/waelisa/mrtg
 
 EOF
 }
 
 # =============================================================================
-# MAIN EXECUTION
+# MAIN
 # =============================================================================
 
 main() {
@@ -1825,7 +1778,7 @@ main() {
     touch "${LOG_FILE}"
     chmod 644 "${LOG_FILE}"
 
-    # Parse command line arguments
+    # Parse arguments
     if [[ $# -gt 0 ]]; then
         case $1 in
             --install|-i)
@@ -1850,12 +1803,15 @@ main() {
                 ;;
             --backup|-b)
                 check_root
-                detect_web_server
                 backup_config
                 ;;
             --restore|-R)
                 check_root
                 restore_config
+                ;;
+            --update|-U)
+                check_root
+                self_update
                 ;;
             --dry-run)
                 check_root
@@ -1880,14 +1836,13 @@ main() {
                 ;;
         esac
     else
-        # Interactive menu
         show_menu
     fi
 }
 
-# Trap errors and cleanup
-trap cleanup EXIT
+# Trap
+trap 'rm -f "${LOCK_FILE}"' EXIT
 trap 'error_exit "Interrupted on line $LINENO"' INT TERM
 
-# Run main function
+# Run
 main "$@"
