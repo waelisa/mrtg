@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v2.2.2
+# MRTG Professional Monitoring Suite - Enterprise Edition v2.2.3
 # Production-Hardened Network Monitoring for Hosting Environments
 # The definitive MRTG installer for hosting environments
 #
@@ -15,7 +15,7 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v2.2.2
+# Version:     v2.2.3
 # Build Date:  02/27/2026
 # License:     MIT
 #
@@ -56,6 +56,7 @@
 #
 # =============================================================================
 
+# Enable strict mode but with better error handling
 set -euo pipefail
 set -E
 IFS=$'\n\t'
@@ -64,7 +65,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v2.2.2"
+readonly SCRIPT_VERSION="v2.2.3"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -106,7 +107,7 @@ DRY_RUN=false
 AUTO_MODE=false
 DEBUG=${DEBUG:-}  # Default DEBUG to empty string to avoid unbound variable
 
-# Color codes
+# Color codes - properly escaped for output
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -114,7 +115,7 @@ readonly BLUE='\033[0;34m'
 readonly MAGENTA='\033[0;35m'
 readonly CYAN='\033[0;36m'
 readonly WHITE='\033[1;37m'
-readonly NC='\033[0m'
+readonly NC='\033[0m' # No Color
 readonly BOLD='\033[1m'
 
 # =============================================================================
@@ -193,6 +194,42 @@ acquire_lock() {
     fi
     echo $$ > "${LOCK_FILE}"
     trap 'rm -f "${LOCK_FILE}"' EXIT
+}
+
+# =============================================================================
+# FIXED: IP Address Detection Function
+# =============================================================================
+detect_ip_address() {
+    local ip=""
+
+    # Try multiple methods to get the primary IP address
+
+    # Method 1: Get IP from default route (most reliable)
+    if command -v ip >/dev/null 2>&1; then
+        ip=$(ip route get 1 2>/dev/null | awk '{print $NF;exit}' | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" || true)
+    fi
+
+    # Method 2: Try hostname -I (shows all IPs, take first)
+    if [[ -z "${ip}" ]] && command -v hostname >/dev/null 2>&1; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+    fi
+
+    # Method 3: Try ifconfig
+    if [[ -z "${ip}" ]] && command -v ifconfig >/dev/null 2>&1; then
+        ip=$(ifconfig 2>/dev/null | grep -E 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' || true)
+    fi
+
+    # Method 4: Try external service (if internet available)
+    if [[ -z "${ip}" ]] && command -v curl >/dev/null 2>&1; then
+        ip=$(curl -s --max-time 2 ifconfig.me 2>/dev/null || echo "")
+    fi
+
+    if [[ -z "${ip}" ]] && command -v wget >/dev/null 2>&1; then
+        ip=$(wget -qO- --timeout=2 ifconfig.me 2>/dev/null || echo "")
+    fi
+
+    # If all methods fail, return localhost
+    echo "${ip:-localhost}"
 }
 
 # =============================================================================
@@ -683,25 +720,6 @@ detect_network_interfaces() {
     printf '%s\n' "${interfaces[@]}"
 }
 
-detect_ip_address() {
-    local ip=""
-
-    # Try multiple methods
-    if command -v ip >/dev/null 2>&1; then
-        ip=$(ip route get 1 2>/dev/null | awk '{print $NF;exit}' || true)
-    fi
-
-    if [[ -z "${ip}" ]] && command -v curl >/dev/null 2>&1; then
-        ip=$(curl -s --max-time 2 ifconfig.me 2>/dev/null || echo "")
-    fi
-
-    if [[ -z "${ip}" ]] && command -v wget >/dev/null 2>&1; then
-        ip=$(wget -qO- --timeout=2 ifconfig.me 2>/dev/null || echo "")
-    fi
-
-    echo "${ip:-localhost}"
-}
-
 # =============================================================================
 # PRODUCTION-HARDENED INSTALLATION FUNCTIONS
 # =============================================================================
@@ -734,6 +752,7 @@ install_dependencies() {
                 python3 \
                 curl \
                 wget \
+                acl \
                 --no-install-recommends || error_exit "Failed to install packages"
             ;;
         centos|rhel|almalinux|rocky|fedora)
@@ -756,14 +775,15 @@ install_dependencies() {
                 ca-certificates \
                 python3 \
                 curl \
-                wget || error_exit "Failed to install packages"
+                wget \
+                acl || error_exit "Failed to install packages"
             ;;
         *)
             log "WARNING" "Unknown OS, attempting generic installation"
             if command -v yum >/dev/null; then
-                yum install -y mrtg net-snmp net-snmp-utils python3 curl wget || error_exit "Failed to install packages"
+                yum install -y mrtg net-snmp net-snmp-utils python3 curl wget acl || error_exit "Failed to install packages"
             elif command -v apt-get >/dev/null; then
-                apt-get update && apt-get install -y mrtg snmpd snmp python3 curl wget || error_exit "Failed to install packages"
+                apt-get update && apt-get install -y mrtg snmpd snmp python3 curl wget acl || error_exit "Failed to install packages"
             else
                 error_exit "Cannot install packages - unsupported package manager"
             fi
@@ -1394,6 +1414,12 @@ create_directories() {
         log "INFO" "Setting DirectAdmin ownership on web directory"
         chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set ownership on web directory"
         chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on web directory"
+
+        # Set ACLs for DirectAdmin to read the files
+        if command -v setfacl >/dev/null 2>&1; then
+            setfacl -R -m u:diradmin:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
+            log "DEBUG" "Set ACLs for diradmin on web directory"
+        fi
     elif id "${WEB_USER}" >/dev/null 2>&1; then
         log "INFO" "Setting ownership to ${WEB_USER}:${WEB_GROUP} on web directory"
         chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || \
@@ -1443,6 +1469,87 @@ create_directories() {
 }
 
 # =============================================================================
+# ENHANCED: DirectAdmin Plugin Integration
+# =============================================================================
+setup_directadmin_plugin() {
+    if [[ "${PANEL_TYPE}" != "directadmin" ]] || [[ "${DRY_RUN}" == true ]]; then
+        return 0
+    fi
+
+    log "INFO" "Setting up DirectAdmin plugin..."
+
+    local da_plugins="/usr/local/directadmin/plugins"
+    local mrtg_plugin="${da_plugins}/mrtg"
+
+    # Create plugin directory structure
+    mkdir -p "${mrtg_plugin}/admin" 2>/dev/null || true
+    mkdir -p "${mrtg_plugin}/data" 2>/dev/null || true
+    mkdir -p "${mrtg_plugin}/hooks" 2>/dev/null || true
+    mkdir -p "${mrtg_plugin}/images" 2>/dev/null || true
+
+    # Create plugin configuration file
+    cat > "${mrtg_plugin}/plugin.conf" << EOF
+# DirectAdmin Plugin Configuration
+# Generated by MRTG Professional Suite v${SCRIPT_VERSION}
+name=mrtg
+active=yes
+installed=yes
+version=${SCRIPT_VERSION}
+author=${SCRIPT_AUTHOR}
+desc=Enterprise network monitoring with service detection
+url=/plugins/mrtg/admin/
+icon=images/mrtg_icon.png
+level=admin
+category=admin
+update_url=${REPO_URL}
+EOF
+
+    # Create simple icon (base64 encoded 1x1 transparent PNG)
+    cat > "${mrtg_plugin}/images/mrtg_icon.png" << 'EOF'
+iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTsfm/wAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAH2SURBVDiNjZI9T9tQFIaf6+vYxIQECQhRNyhSpC5dmjIUqUtXJP6A/AJ26V/oxA9AomN3FrZ27MxWqRIDDEh8fM+xS0mI05E+0zvdc86rI0op/ie01uRyOQqFAq1Wi/PzcxRFUVVV5ubmaDab+L7P8PAw4+PjFAoF5ufnkVJyf3/P4eEhuVyO1dVVFhYWODw8ZGdnh1gsRiqVYnFxkXq9TqPRoNFo4DgOnU6HWCxGpVLBMAx838d1XUqlEpeXl+zv79NqtQjDkFwux9LSErOzs5yenlKpVEgkEjQaDWzbJp1Oo5RidHSUWCyGbdvkcjlarRaWZXF7e4vnebTbbdrtNvl8nqGhIaSUlMtlPM9jYmKCUqnE0dERjuMQRRGWZTE1NcXDwwMnJyek02l832d8fJzh4WFUVVEUheF4HIZh4DgOc3NzxONxXNel2WxSKBRoNpsUi0Vs26ZQKHB2doaUklgshlIKrTVaa6SUWJZFrVYjDENs2yaTyRBFEaOjo0RRRBRF+L7P6OgojuMQhiFaa4QQQoUQQgghhBAiBEEghBAiCIIwjmMhYowxQggBICJExBhjjDHGmBACEMYYI4QQQggBEEL8W1EUhRBCiP8uiiIhhBARQggRhqEQQkQIIUSE1loopYQQQkQppXAcB8dxSCaT+L6P1hrHcUgmk7iui1IKz/NIJpO4rovWmpubG6anp3l+fiYIAkZHR0kmk7iuS6vVYnJykvbLC+fn57TbbTzPY2hoiEKhQKvV4ubmhv8Ck0dn3scT1hQAAAAASUVORK5CYII=
+EOF
+
+    # Create admin index page with redirect
+    cat > "${mrtg_plugin}/admin/index.html" << EOF
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="refresh" content="0; url=/mrtg/">
+    <title>MRTG Network Monitor</title>
+</head>
+<body>
+    <script>window.location.href='/mrtg/';</script>
+    <p>Redirecting to <a href="/mrtg/">MRTG Network Monitor</a>...</p>
+</body>
+</html>
+EOF
+
+    # Set proper ownership and permissions
+    if id diradmin >/dev/null 2>&1; then
+        chown -R diradmin:diradmin "${mrtg_plugin}" 2>/dev/null || true
+        chmod 755 "${mrtg_plugin}" 2>/dev/null || true
+        chmod 644 "${mrtg_plugin}/plugin.conf" 2>/dev/null || true
+        chmod 644 "${mrtg_plugin}/admin/index.html" 2>/dev/null || true
+        chmod 644 "${mrtg_plugin}/images/mrtg_icon.png" 2>/dev/null || true
+    fi
+
+    # Grant diradmin access to MRTG web directory
+    if [[ -d "${WEB_MRTG_DIR}" ]] && command -v setfacl >/dev/null 2>&1; then
+        setfacl -R -m u:diradmin:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
+        log "DEBUG" "Set ACLs for diradmin on web directory"
+    fi
+
+    # Restart DirectAdmin to load plugin
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart directadmin 2>/dev/null || true
+    elif command -v service >/dev/null 2>&1; then
+        service directadmin restart 2>/dev/null || true
+    fi
+
+    log "SUCCESS" "DirectAdmin plugin installed with native structure"
+}
+
+# =============================================================================
 # RSPAMD MONITORING SETUP (with timeout protection and robust JSON parsing)
 # =============================================================================
 setup_rspamd_monitoring() {
@@ -1455,7 +1562,7 @@ setup_rspamd_monitoring() {
     # Create the Rspamd stats helper script with robust JSON parsing
     cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
 #!/bin/bash
-# Rspamd Statistics Collector for MRTG v2.2.2
+# Rspamd Statistics Collector for MRTG v2.2.3
 # Handles timeouts, permissions, and malformed JSON gracefully
 
 # Query with 2-second timeout to prevent hanging
@@ -1560,7 +1667,7 @@ setup_cron() {
     # All runner-specific variables are escaped with backslash
     cat > "${MRTG_BIN}/run-mrtg.sh" << EOF
 #!/bin/bash
-# MRTG Runner - Generated by MRTG Professional Suite v2.2.2
+# MRTG Runner - Generated by MRTG Professional Suite v2.2.3
 # Includes lockfile to prevent race conditions on high-traffic servers
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -1712,7 +1819,6 @@ Alias /mrtg ${WEB_MRTG_DIR}
     Require all granted
 
     # Allow access from localhost only for security
-    # Uncomment the following lines to restrict access
     # <RequireAny>
     #     Require ip 127.0.0.1
     #     Require ip ::1
@@ -1758,7 +1864,7 @@ EOF
         # Ensure Apache can read the files
         if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
             # For DirectAdmin, ensure Apache user can read
-            if id www-data >/dev/null 2>&1; then
+            if id www-data >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
                 setfacl -R -m u:www-data:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
             fi
         else
@@ -1792,6 +1898,16 @@ EOF
 
         # Set 644 on files
         find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
+
+        # Set ACLs for web server user
+        if command -v setfacl >/dev/null 2>&1; then
+            if id www-data >/dev/null 2>&1; then
+                setfacl -R -m u:www-data:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
+            fi
+            if id apache >/dev/null 2>&1; then
+                setfacl -R -m u:apache:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
+            fi
+        fi
 
         log "SUCCESS" "DirectAdmin permissions set"
     fi
@@ -1830,205 +1946,6 @@ EOF
     fi
 
     log "SUCCESS" "Web access configured"
-}
-
-# =============================================================================
-# DIRECTADMIN PLUGIN INTEGRATION (with native plugin structure)
-# =============================================================================
-configure_panel_integration() {
-    if [[ "${PANEL_TYPE}" == "none" ]] || [[ "${DRY_RUN}" == true ]]; then
-        return 0
-    fi
-
-    log "INFO" "Configuring ${PANEL_TYPE} integration..."
-
-    case "${PANEL_TYPE}" in
-        "directadmin")
-            local da_plugins="/usr/local/directadmin/plugins"
-            local mrtg_plugin="${da_plugins}/mrtg"
-
-            mkdir -p "${mrtg_plugin}/admin" "${mrtg_plugin}/data" "${mrtg_plugin}/hooks" "${mrtg_plugin}/images" 2>/dev/null || true
-
-            # =================================================================
-            # CRITICAL: DirectAdmin plugin.conf with all required flags
-            # =================================================================
-            cat > "${mrtg_plugin}/plugin.conf" << EOF
-# DirectAdmin Plugin Configuration
-# Generated by MRTG Professional Suite v${SCRIPT_VERSION}
-
-name=MRTG Suite
-id=mrtg
-version=${SCRIPT_VERSION}
-desc=Enterprise network monitoring with service detection
-url=/plugins/mrtg/admin/
-icon=images/mrtg_icon.png
-level=admin
-category=admin
-active=yes
-installed=yes
-author=${SCRIPT_AUTHOR}
-update_url=${REPO_URL}
-EOF
-
-            # Create a simple icon (base64 encoded 1x1 transparent PNG as fallback)
-            cat > "${mrtg_plugin}/images/mrtg_icon.png" << 'EOF'
-iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTsfm/wAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAH2SURBVDiNjZI9T9tQFIaf6+vYxIQECQhRNyhSpC5dmjIUqUtXJP6A/AJ26V/oxA9AomN3FrZ27MxWqRIDDEh8fM+xS0mI05E+0zvdc86rI0op/ie01uRyOQqFAq1Wi/PzcxRFUVVV5ubmaDab+L7P8PAw4+PjFAoF5ufnkVJyf3/P4eEhuVyO1dVVFhYWODw8ZGdnh1gsRiqVYnFxkXq9TqPRoNFo4DgOnU6HWCxGpVLBMAx838d1XUqlEpeXl+zv79NqtQjDkFwux9LSErOzs5yenlKpVEgkEjQaDWzbJp1Oo5RidHSUWCyGbdvkcjlarRaWZXF7e4vnebTbbdrtNvl8nqGhIaSUlMtlPM9jYmKCUqnE0dERjuMQRRGWZTE1NcXDwwMnJyek02l832d8fJzh4WFUVVEUheF4HIZh4DgOc3NzxONxXNel2WxSKBRoNpsUi0Vs26ZQKHB2doaUklgshlIKrTVaa6SUWJZFrVYjDENs2yaTyRBFEaOjo0RRRBRF+L7P6OgojuMQhiFaa4QQQoUQQgghhBAiBEEghBAiCIIwjmMhYowxQggBICJExBhjjDHGmBACEMYYI4QQQggBEEL8W1EUhRBCiP8uiiIhhBARQggRhqEQQkQIIUSE1loopYQQQkQppXAcB8dxSCaT+L6P1hrHcUgmk7iui1IKz/NIJpO4rovWmpubG6anp3l+fiYIAkZHR0kmk7iuS6vVYnJykvbLC+fn57TbbTzPY2hoiEKhQKvV4ubmhv8Ck0dn3scT1hQAAAAASUVORK5CYII=
-EOF
-
-            # Create plugin admin page with service detection
-            cat > "${mrtg_plugin}/admin/index.html" << EOF
-<!DOCTYPE html>
-<html>
-<head>
-    <title>MRTG Network Monitor</title>
-    <meta http-equiv="refresh" content="300">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
-        .stats { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 20px; }
-        .stat-box { background: white; padding: 15px; border-radius: 5px; flex: 1 1 200px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        .stat-box h3 { margin: 0 0 10px 0; color: #666; font-size: 14px; }
-        .stat-box .value { font-size: 24px; font-weight: bold; color: #667eea; }
-        .content { background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        iframe { border: 1px solid #ddd; border-radius: 5px; background: white; width: 100%; height: 800px; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>MRTG Network Monitor</h1>
-        <p>DirectAdmin Integration | Version ${SCRIPT_VERSION}</p>
-    </div>
-
-    <div class="stats">
-EOF
-
-            # Add dynamic service status boxes
-            if [[ "${HAS_RSPAMD}" == true ]]; then
-                cat >> "${mrtg_plugin}/admin/index.html" << EOF
-        <div class="stat-box">
-            <h3>Rspamd Email Filter</h3>
-            <div class="value">Active</div>
-        </div>
-EOF
-            fi
-
-            if [[ "${HAS_MYSQL}" == true ]]; then
-                cat >> "${mrtg_plugin}/admin/index.html" << EOF
-        <div class="stat-box">
-            <h3>MySQL/MariaDB</h3>
-            <div class="value">Active</div>
-        </div>
-EOF
-            fi
-
-            if [[ "${HAS_REDIS}" == true ]]; then
-                cat >> "${mrtg_plugin}/admin/index.html" << EOF
-        <div class="stat-box">
-            <h3>Redis Cache</h3>
-            <div class="value">Active</div>
-        </div>
-EOF
-            fi
-
-            cat >> "${mrtg_plugin}/admin/index.html" << EOF
-    </div>
-
-    <div class="content">
-        <iframe src="/mrtg/" frameborder="0"></iframe>
-    </div>
-</body>
-</html>
-EOF
-
-            # Set proper ownership for DirectAdmin
-            if id diradmin >/dev/null 2>&1; then
-                chown -R diradmin:diradmin "${mrtg_plugin}" 2>/dev/null || true
-                chmod 755 "${mrtg_plugin}" 2>/dev/null || true
-                chmod 644 "${mrtg_plugin}/plugin.conf" 2>/dev/null || true
-            fi
-
-            log "SUCCESS" "DirectAdmin plugin installed with native structure"
-            ;;
-
-        "cpanel")
-            if [[ -d "/usr/local/apache/htdocs" ]]; then
-                ln -sfn "${WEB_MRTG_DIR}" "/usr/local/apache/htdocs/mrtg" 2>/dev/null || true
-                log "SUCCESS" "cPanel integration configured"
-            fi
-            ;;
-
-        "plesk")
-            if [[ -d "/var/www/vhosts/default/htdocs" ]]; then
-                ln -sfn "${WEB_MRTG_DIR}" "/var/www/vhosts/default/htdocs/mrtg" 2>/dev/null || true
-                log "SUCCESS" "Plesk integration configured"
-            fi
-            ;;
-    esac
-}
-
-# =============================================================================
-# CRITICAL: 3-PASS WARMUP FUNCTION WITH VALIDATION
-# =============================================================================
-initialize_mrtg() {
-    log "INFO" "Initializing MRTG data collection (3-pass warmup)..."
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would run MRTG 3 times to seed data"
-        return 0
-    fi
-
-    local mrtg_path=$(command -v mrtg || echo "/usr/bin/mrtg")
-    local cfg_file="${MRTG_CONF}/mrtg.cfg"
-
-    # Ensure directories exist
-    mkdir -p "${MRTG_LOG}" "${WEB_MRTG_DIR}"
-
-    # =====================================================================
-    # CRITICAL: 3-pass warmup loop
-    # First run creates .log files (may error)
-    # Second run creates .old files (may error)
-    # Third run calculates rates (should succeed)
-    # =====================================================================
-    for i in {1..3}; do
-        log "INFO" "Warmup pass ${i}/3..."
-
-        # Run MRTG and ignore errors (they're expected during warmup)
-        if ! env LANG=C ${mrtg_path} "${cfg_file}" --logging "${MRTG_LOG}/mrtg.log" >/dev/null 2>&1; then
-            log "INFO" "Pass ${i} completed (expected warnings ignored)"
-        fi
-
-        # Small delay between runs
-        sleep 2
-    done
-
-    # Generate index page
-    log "INFO" "Generating index page..."
-    local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
-    ${indexmaker_path} "${cfg_file}" --output="${WEB_MRTG_DIR}/index.html" 2>/dev/null || true
-
-    # =====================================================================
-    # CRITICAL: Verify index page was generated correctly
-    # FIXED: Looking for "MRTG" not "MRTG Index Page"
-    # =====================================================================
-    if [[ -f "${WEB_MRTG_DIR}/index.html" ]] && grep -q "MRTG" "${WEB_MRTG_DIR}/index.html" 2>/dev/null; then
-        log "SUCCESS" "Index page verified - contains MRTG content"
-    else
-        log "WARNING" "Index page may be incomplete - check configuration"
-    fi
-
-    # Set permissions
-    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
-        if id diradmin >/dev/null 2>&1; then
-            chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
-        fi
-        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
-        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
-    else
-        chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
-        chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
-    fi
-
-    log "SUCCESS" "Initialization complete - MRTG data seeded"
 }
 
 # =============================================================================
@@ -2335,6 +2252,11 @@ repair_installation() {
     log "INFO" "Fixing Apache configuration..."
     setup_web_access
 
+    # Fix DirectAdmin plugin
+    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
+        setup_directadmin_plugin
+    fi
+
     # Restart SNMP
     log "INFO" "Restarting SNMP..."
     if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
@@ -2372,6 +2294,16 @@ repair_installation() {
         fi
         chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
         find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
+
+        # Set ACLs for web server
+        if command -v setfacl >/dev/null 2>&1; then
+            if id www-data >/dev/null 2>&1; then
+                setfacl -R -m u:www-data:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
+            fi
+            if id apache >/dev/null 2>&1; then
+                setfacl -R -m u:apache:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
+            fi
+        fi
     else
         chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
         chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
@@ -2482,94 +2414,68 @@ restore_config() {
 }
 
 # =============================================================================
-# UNINSTALL FUNCTIONS
+# CRITICAL: 3-PASS WARMUP FUNCTION WITH VALIDATION
 # =============================================================================
-
-uninstall_mrtg() {
-    log "INFO" "Starting uninstall..."
+initialize_mrtg() {
+    log "INFO" "Initializing MRTG data collection (3-pass warmup)..."
 
     if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would perform uninstall"
+        log "INFO" "Would run MRTG 3 times to seed data"
         return 0
     fi
 
-    if [[ "${FORCE_MODE}" != true ]]; then
-        echo -e "${RED}${BOLD}WARNING: This will remove MRTG and all configurations${NC}"
-        echo -e "Affected:"
-        echo -e "  - ${MRTG_BASE}"
-        echo -e "  - ${WEB_MRTG_DIR}"
-        echo -e "  - /etc/snmp/snmpd.conf"
-        echo -e "  - MRTG cron jobs"
-        echo -e "  - DirectAdmin plugin (if installed)"
-        echo -e "  - Logrotate configuration"
-        echo -e "  - Apache MRTG configuration"
-        echo ""
+    local mrtg_path=$(command -v mrtg || echo "/usr/bin/mrtg")
+    local cfg_file="${MRTG_CONF}/mrtg.cfg"
 
-        if ! confirm_action "Continue with uninstall?"; then
-            log "INFO" "Uninstall cancelled"
-            return 0
+    # Ensure directories exist
+    mkdir -p "${MRTG_LOG}" "${WEB_MRTG_DIR}"
+
+    # =====================================================================
+    # CRITICAL: 3-pass warmup loop
+    # First run creates .log files (may error)
+    # Second run creates .old files (may error)
+    # Third run calculates rates (should succeed)
+    # =====================================================================
+    for i in {1..3}; do
+        log "INFO" "Warmup pass ${i}/3..."
+
+        # Run MRTG and ignore errors (they're expected during warmup)
+        if ! env LANG=C ${mrtg_path} "${cfg_file}" --logging "${MRTG_LOG}/mrtg.log" >/dev/null 2>&1; then
+            log "INFO" "Pass ${i} completed (expected warnings ignored)"
         fi
+
+        # Small delay between runs
+        sleep 2
+    done
+
+    # Generate index page
+    log "INFO" "Generating index page..."
+    local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
+    ${indexmaker_path} "${cfg_file}" --output="${WEB_MRTG_DIR}/index.html" 2>/dev/null || true
+
+    # =====================================================================
+    # CRITICAL: Verify index page was generated correctly
+    # FIXED: Looking for "MRTG" not "MRTG Index Page"
+    # =====================================================================
+    if [[ -f "${WEB_MRTG_DIR}/index.html" ]] && grep -q "MRTG" "${WEB_MRTG_DIR}/index.html" 2>/dev/null; then
+        log "SUCCESS" "Index page verified - contains MRTG content"
+    else
+        log "WARNING" "Index page may be incomplete - check configuration"
     fi
 
-    # Backup
-    backup_config
-
-    # Remove cron
-    log "INFO" "Removing cron..."
-    crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab - || true
-
-    # Remove logrotate
-    if [[ -f /etc/logrotate.d/mrtg ]]; then
-        log "INFO" "Removing logrotate configuration..."
-        rm -f /etc/logrotate.d/mrtg
-    fi
-
-    # Remove Apache configuration
-    if [[ -f /etc/apache2/conf-available/mrtg.conf ]]; then
-        log "INFO" "Removing Apache configuration..."
-        a2disconf mrtg >/dev/null 2>&1 || true
-        rm -f /etc/apache2/conf-available/mrtg.conf
-        systemctl reload apache2 2>/dev/null || true
-    fi
-    if [[ -f /etc/httpd/conf.d/mrtg.conf ]]; then
-        log "INFO" "Removing Apache configuration..."
-        rm -f /etc/httpd/conf.d/mrtg.conf
-        systemctl reload httpd 2>/dev/null || true
-    fi
-
-    # Remove DirectAdmin plugin
-    if [[ -d "/usr/local/directadmin/plugins/mrtg" ]]; then
-        log "INFO" "Removing DirectAdmin plugin..."
-        rm -rf "/usr/local/directadmin/plugins/mrtg"
-    fi
-
-    # Remove packages?
-    if confirm_action "Remove MRTG and SNMP packages?"; then
-        log "INFO" "Removing packages..."
-        case "${OS_ID}" in
-            ubuntu|debian)
-                apt-get remove --purge -y mrtg snmpd snmp || true
-                ;;
-            centos|rhel|almalinux|rocky|fedora)
-                yum remove -y mrtg net-snmp net-snmp-utils || true
-                ;;
-        esac
-    fi
-
-    # Remove data?
-    if confirm_action "Remove all MRTG data?"; then
-        log "INFO" "Removing files..."
-        rm -rf "${MRTG_BASE}" "${MRTG_VAR}" "${WEB_MRTG_DIR}" || true
-
-        # Restore SNMP config?
-        local snmp_backup=$(ls -1 /etc/snmp/snmpd.conf.backup.* 2>/dev/null | head -1)
-        if [[ -n "${snmp_backup}" ]] && confirm_action "Restore original SNMP config?"; then
-            cp "${snmp_backup}" /etc/snmp/snmpd.conf || true
-            systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
+    # Set permissions
+    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
+        if id diradmin >/dev/null 2>&1; then
+            chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
         fi
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
+    else
+        chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
+        chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
     fi
 
-    log "SUCCESS" "Uninstall completed"
+    log "SUCCESS" "Initialization complete - MRTG data seeded"
 }
 
 # =============================================================================
@@ -2691,7 +2597,14 @@ EOF
 
     generate_mrtg_config
     setup_web_access
-    configure_panel_integration
+
+    # Setup panel integration
+    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
+        setup_directadmin_plugin
+    else
+        configure_panel_integration
+    fi
+
     setup_cron
     setup_logrotate
     initialize_mrtg
@@ -2730,7 +2643,12 @@ EOF
     echo -e "Logs: ${CYAN}${MRTG_LOG}/mrtg.log${NC}"
     echo -e "Log Rotation: ${CYAN}/etc/logrotate.d/mrtg${NC}"
     echo -e "CPU Priority: ${CYAN}Low (nice/ionice)${NC}"
-    echo -e "Apache Config: ${CYAN}/etc/apache2/conf-available/mrtg.conf${NC}"
+
+    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
+        echo -e "DirectAdmin Plugin: ${CYAN}/usr/local/directadmin/plugins/mrtg${NC}"
+    elif [[ -f /etc/apache2/conf-available/mrtg.conf ]] || [[ -f /etc/httpd/conf.d/mrtg.conf ]]; then
+        echo -e "Apache Config: ${CYAN}/etc/apache2/conf-available/mrtg.conf${NC}"
+    fi
 
     if [[ ${#services[@]} -gt 0 ]]; then
         echo -e "Monitored Services: ${CYAN}${services[*]}${NC}"
@@ -2840,51 +2758,172 @@ EOF
 }
 
 # =============================================================================
+# DIRECTADMIN PLUGIN INTEGRATION (with native plugin structure)
+# =============================================================================
+configure_panel_integration() {
+    if [[ "${PANEL_TYPE}" == "none" ]] || [[ "${DRY_RUN}" == true ]]; then
+        return 0
+    fi
+
+    log "INFO" "Configuring ${PANEL_TYPE} integration..."
+
+    case "${PANEL_TYPE}" in
+        "directadmin")
+            setup_directadmin_plugin
+            ;;
+
+        "cpanel")
+            if [[ -d "/usr/local/apache/htdocs" ]]; then
+                ln -sfn "${WEB_MRTG_DIR}" "/usr/local/apache/htdocs/mrtg" 2>/dev/null || true
+                log "SUCCESS" "cPanel integration configured"
+            fi
+            ;;
+
+        "plesk")
+            if [[ -d "/var/www/vhosts/default/htdocs" ]]; then
+                ln -sfn "${WEB_MRTG_DIR}" "/var/www/vhosts/default/htdocs/mrtg" 2>/dev/null || true
+                log "SUCCESS" "Plesk integration configured"
+            fi
+            ;;
+    esac
+}
+
+# =============================================================================
+# UNINSTALL FUNCTIONS
+# =============================================================================
+
+uninstall_mrtg() {
+    log "INFO" "Starting uninstall..."
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would perform uninstall"
+        return 0
+    fi
+
+    if [[ "${FORCE_MODE}" != true ]]; then
+        echo -e "${RED}${BOLD}WARNING: This will remove MRTG and all configurations${NC}"
+        echo -e "Affected:"
+        echo -e "  - ${MRTG_BASE}"
+        echo -e "  - ${WEB_MRTG_DIR}"
+        echo -e "  - /etc/snmp/snmpd.conf"
+        echo -e "  - MRTG cron jobs"
+        echo -e "  - DirectAdmin plugin (if installed)"
+        echo -e "  - Logrotate configuration"
+        echo -e "  - Apache MRTG configuration"
+        echo ""
+
+        if ! confirm_action "Continue with uninstall?"; then
+            log "INFO" "Uninstall cancelled"
+            return 0
+        fi
+    fi
+
+    # Backup
+    backup_config
+
+    # Remove cron
+    log "INFO" "Removing cron..."
+    crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab - || true
+
+    # Remove logrotate
+    if [[ -f /etc/logrotate.d/mrtg ]]; then
+        log "INFO" "Removing logrotate configuration..."
+        rm -f /etc/logrotate.d/mrtg
+    fi
+
+    # Remove Apache configuration
+    if [[ -f /etc/apache2/conf-available/mrtg.conf ]]; then
+        log "INFO" "Removing Apache configuration..."
+        a2disconf mrtg >/dev/null 2>&1 || true
+        rm -f /etc/apache2/conf-available/mrtg.conf
+        systemctl reload apache2 2>/dev/null || true
+    fi
+    if [[ -f /etc/httpd/conf.d/mrtg.conf ]]; then
+        log "INFO" "Removing Apache configuration..."
+        rm -f /etc/httpd/conf.d/mrtg.conf
+        systemctl reload httpd 2>/dev/null || true
+    fi
+
+    # Remove DirectAdmin plugin
+    if [[ -d "/usr/local/directadmin/plugins/mrtg" ]]; then
+        log "INFO" "Removing DirectAdmin plugin..."
+        rm -rf "/usr/local/directadmin/plugins/mrtg"
+    fi
+
+    # Remove packages?
+    if confirm_action "Remove MRTG and SNMP packages?"; then
+        log "INFO" "Removing packages..."
+        case "${OS_ID}" in
+            ubuntu|debian)
+                apt-get remove --purge -y mrtg snmpd snmp || true
+                ;;
+            centos|rhel|almalinux|rocky|fedora)
+                yum remove -y mrtg net-snmp net-snmp-utils || true
+                ;;
+        esac
+    fi
+
+    # Remove data?
+    if confirm_action "Remove all MRTG data?"; then
+        log "INFO" "Removing files..."
+        rm -rf "${MRTG_BASE}" "${MRTG_VAR}" "${WEB_MRTG_DIR}" || true
+
+        # Restore SNMP config?
+        local snmp_backup=$(ls -1 /etc/snmp/snmpd.conf.backup.* 2>/dev/null | head -1)
+        if [[ -n "${snmp_backup}" ]] && confirm_action "Restore original SNMP config?"; then
+            cp "${snmp_backup}" /etc/snmp/snmpd.conf || true
+            systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
+        fi
+    fi
+
+    log "SUCCESS" "Uninstall completed"
+}
+
+# =============================================================================
 # COMMAND LINE INTERFACE
 # =============================================================================
 
 print_help() {
-    cat << EOF
-${BOLD}NAME${NC}
-    ${SCRIPT_NAME} - MRTG Professional Monitoring Suite ${SCRIPT_VERSION}
-
-${BOLD}SYNOPSIS${NC}
-    ${SCRIPT_NAME} [OPTIONS]
-
-${BOLD}OPTIONS${NC}
-    --install, -i     Run installation wizard
-    --uninstall, -u   Complete removal
-    --status, -s      Health check
-    --repair, -r      Fix common issues
-    --backup, -b      Backup configuration
-    --restore, -R     Restore from backup
-    --update, -U      Self-update from GitHub
-    --auto, -a        Unattended installation (uses defaults)
-    --dry-run         Test without changes
-    --force           Skip confirmations
-    --version, -v     Show version
-    --help, -h        Show this help
-
-${BOLD}EXAMPLES${NC}
-    ${SCRIPT_NAME} --install      # Install MRTG with all service monitoring
-    ${SCRIPT_NAME} --auto         # Unattended installation with defaults
-    ${SCRIPT_NAME} --status       # Check system health
-    ${SCRIPT_NAME} --repair       # Fix common issues
-    ${SCRIPT_NAME} --update       # Update script from GitHub
-    ${SCRIPT_NAME} --uninstall    # Remove MRTG completely
-
-${BOLD}FILES${NC}
-    ${MRTG_BASE}         Main installation directory
-    ${MRTG_CONF}         Configuration files
-    ${MRTG_LOG}          Log files
-    ${MRTG_SCRIPTS}      Helper scripts (Rspamd, etc)
-    ${BACKUP_DIR}        Backup storage
-
-${BOLD}AUTHOR${NC}
-    Written by ${SCRIPT_AUTHOR}
-    GitHub: https://github.com/waelisa/mrtg
-
-EOF
+    # Use raw text without color codes for help output to avoid display issues
+    echo "NAME"
+    echo "    ${SCRIPT_NAME} - MRTG Professional Monitoring Suite ${SCRIPT_VERSION}"
+    echo ""
+    echo "SYNOPSIS"
+    echo "    ${SCRIPT_NAME} [OPTIONS]"
+    echo ""
+    echo "OPTIONS"
+    echo "    --install, -i     Run installation wizard"
+    echo "    --uninstall, -u   Complete removal"
+    echo "    --status, -s      Health check"
+    echo "    --repair, -r      Fix common issues"
+    echo "    --backup, -b      Backup configuration"
+    echo "    --restore, -R     Restore from backup"
+    echo "    --update, -U      Self-update from GitHub"
+    echo "    --auto, -a        Unattended installation (uses defaults)"
+    echo "    --dry-run         Test without changes"
+    echo "    --force           Skip confirmations"
+    echo "    --version, -v     Show version"
+    echo "    --help, -h        Show this help"
+    echo ""
+    echo "EXAMPLES"
+    echo "    ${SCRIPT_NAME} --install      # Install MRTG with all service monitoring"
+    echo "    ${SCRIPT_NAME} --auto         # Unattended installation with defaults"
+    echo "    ${SCRIPT_NAME} --status       # Check system health"
+    echo "    ${SCRIPT_NAME} --repair       # Fix common issues"
+    echo "    ${SCRIPT_NAME} --update       # Update script from GitHub"
+    echo "    ${SCRIPT_NAME} --uninstall    # Remove MRTG completely"
+    echo ""
+    echo "FILES"
+    echo "    ${MRTG_BASE}         Main installation directory"
+    echo "    ${MRTG_CONF}         Configuration files"
+    echo "    ${MRTG_LOG}          Log files"
+    echo "    ${MRTG_SCRIPTS}      Helper scripts (Rspamd, etc)"
+    echo "    ${BACKUP_DIR}        Backup storage"
+    echo ""
+    echo "AUTHOR"
+    echo "    Written by ${SCRIPT_AUTHOR}"
+    echo "    GitHub: ${REPO_URL}"
+    echo ""
 }
 
 # =============================================================================
