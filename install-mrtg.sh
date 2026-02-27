@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v1.7.0
+# MRTG Professional Monitoring Suite - Enterprise Edition v1.8.0
 # Production-Hardened Network Monitoring for Hosting Environments
-# With Rspamd Email Filter Monitoring
+# With Rspamd Email Filter Monitoring & Service Detection
 #
 # =============================================================================
 # ██╗    ██╗ █████╗ ███████╗██╗         ██╗███████╗ █████╗
@@ -15,7 +15,7 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v1.7.0
+# Version:     v1.8.0
 # Build Date:  02/27/2026
 # License:     MIT
 #
@@ -26,7 +26,8 @@
 #   - Smart CSF firewall configuration with syntax safety
 #   - 3-pass warmup to eliminate first-run errors
 #   - SNMP stabilization delay for slow servers
-#   - Rspamd email filter monitoring (if detected)
+#   - Rspamd email filter monitoring with permission fixes
+#   - Service detection (MySQL, Redis, Exim, Dovecot)
 #   - Complete uninstall with rollback
 #   - Real-time health monitoring
 #   - Automatic updates from GitHub
@@ -55,7 +56,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v1.7.0"
+readonly SCRIPT_VERSION="v1.8.0"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -82,6 +83,10 @@ WEB_GROUP=""
 WEB_SERVER="unknown"
 PANEL_TYPE="none"
 HAS_RSPAMD=false
+HAS_MYSQL=false
+HAS_REDIS=false
+HAS_EXIM=false
+HAS_DOVECOT=false
 INTERVAL=${DEFAULT_INTERVAL}
 FORCE_MODE=false
 DRY_RUN=false
@@ -464,6 +469,10 @@ detect_web_root() {
     log "INFO" "Web directory: ${WEB_MRTG_DIR}"
 }
 
+# =============================================================================
+# SERVICE DETECTION FUNCTIONS
+# =============================================================================
+
 detect_rspamd() {
     log "INFO" "Checking for Rspamd email filter..."
 
@@ -476,6 +485,56 @@ detect_rspamd() {
     else
         HAS_RSPAMD=false
         log "INFO" "Rspamd not detected (optional)"
+    fi
+}
+
+detect_mysql() {
+    log "INFO" "Checking for MySQL/MariaDB..."
+
+    if command -v mysql >/dev/null 2>&1 && systemctl is-active --quiet mysql 2>/dev/null; then
+        HAS_MYSQL=true
+        log "SUCCESS" "MySQL/MariaDB detected"
+    elif command -v mysql >/dev/null 2>&1 && systemctl is-active --quiet mariadb 2>/dev/null; then
+        HAS_MYSQL=true
+        log "SUCCESS" "MySQL/MariaDB detected"
+    else
+        HAS_MYSQL=false
+    fi
+}
+
+detect_redis() {
+    log "INFO" "Checking for Redis..."
+
+    if command -v redis-server >/dev/null 2>&1 && systemctl is-active --quiet redis 2>/dev/null; then
+        HAS_REDIS=true
+        log "SUCCESS" "Redis detected"
+    else
+        HAS_REDIS=false
+    fi
+}
+
+detect_exim() {
+    log "INFO" "Checking for Exim MTA..."
+
+    if command -v exim >/dev/null 2>&1 && systemctl is-active --quiet exim 2>/dev/null; then
+        HAS_EXIM=true
+        log "SUCCESS" "Exim detected"
+    elif command -v exim4 >/dev/null 2>&1 && systemctl is-active --quiet exim4 2>/dev/null; then
+        HAS_EXIM=true
+        log "SUCCESS" "Exim detected"
+    else
+        HAS_EXIM=false
+    fi
+}
+
+detect_dovecot() {
+    log "INFO" "Checking for Dovecot IMAP/POP3..."
+
+    if command -v dovecot >/dev/null 2>&1 && systemctl is-active --quiet dovecot 2>/dev/null; then
+        HAS_DOVECOT=true
+        log "SUCCESS" "Dovecot detected"
+    else
+        HAS_DOVECOT=false
     fi
 }
 
@@ -530,7 +589,7 @@ install_dependencies() {
     log "INFO" "Installing MRTG and SNMP packages..."
 
     if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would install: mrtg, snmpd, snmp, perl modules"
+        log "INFO" "Would install: mrtg, snmpd, snmp, perl modules, python3"
         return 0
     fi
 
@@ -551,6 +610,9 @@ install_dependencies() {
                 openssl \
                 ca-certificates \
                 python3 \
+                python3-json \
+                curl \
+                wget \
                 --no-install-recommends
             ;;
         centos|rhel|almalinux|rocky|fedora)
@@ -570,14 +632,17 @@ install_dependencies() {
                 perl-Net-SNMP \
                 openssl \
                 ca-certificates \
-                python3
+                python3 \
+                python3-json \
+                curl \
+                wget
             ;;
         *)
             log "WARNING" "Unknown OS, attempting generic installation"
             if command -v yum >/dev/null; then
-                yum install -y mrtg net-snmp net-snmp-utils python3
+                yum install -y mrtg net-snmp net-snmp-utils python3 curl wget
             elif command -v apt-get >/dev/null; then
-                apt-get update && apt-get install -y mrtg snmpd snmp python3
+                apt-get update && apt-get install -y mrtg snmpd snmp python3 curl wget
             else
                 error_exit "Cannot install packages - unsupported package manager"
             fi
@@ -649,6 +714,9 @@ proc  mysql 10 5
 proc  sshd
 proc  snmpd
 proc  rspamd 5 3
+proc  redis 5 3
+proc  exim 10 5
+proc  dovecot 10 5
 
 # Disk monitoring
 includeAllDisks 10%
@@ -672,63 +740,9 @@ access paranoid "" any noauth exact system none none
 
 EOF
 
-    # =====================================================================
-    # RSPAMD MONITORING INTEGRATION
-    # If Rspamd is detected, create a helper script and SNMP extension
-    # =====================================================================
-    if [[ "${HAS_RSPAMD}" == true ]]; then
-        log "INFO" "Configuring Rspamd monitoring..."
-
-        # Create scripts directory
-        mkdir -p "${MRTG_SCRIPTS}"
-
-        # Create Rspamd stats collection script
-        cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
-#!/bin/bash
-# Rspamd Statistics Collector for MRTG
-# Returns: scanned_messages rejected_messages
-
-# Try to get stats from rspamc
-STATS=$(rspamc -j stat 2>/dev/null)
-
-if [ $? -eq 0 ] && [ -n "$STATS" ]; then
-    # Parse JSON output
-    SCANNED=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('scanned', 0))" 2>/dev/null)
-    REJECTED=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('actions', {}).get('reject', 0))" 2>/dev/null)
-
-    # Fallback to zero if parsing failed
-    echo "${SCANNED:-0}"
-    echo "${REJECTED:-0}"
-else
-    # Alternative: check Rspamd stats file
-    if [ -f /var/log/rspamd/stats.log ]; then
-        tail -1 /var/log/rspamd/stats.log | awk '{print $2; print $4}' 2>/dev/null || echo -e "0\n0"
-    else
-        echo -e "0\n0"
-    fi
-fi
-EOF
-
-        chmod +x "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
-
-        # Add SNMP extension for Rspamd
-        echo "# Rspamd Monitoring Extension" >> /etc/snmp/snmpd.conf
-        echo "extend rspamd /bin/sh ${MRTG_SCRIPTS}/get_rspamd_stats.sh" >> /etc/snmp/snmpd.conf
-
-        # Add rspamd user to necessary groups for socket access
-        if id rspamd >/dev/null 2>&1; then
-            usermod -aG rspamd snmpd 2>/dev/null || usermod -aG rspamd snmp 2>/dev/null || true
-        fi
-
-        log "SUCCESS" "Rspamd monitoring configured"
-    fi
-
     chmod 600 /etc/snmp/snmpd.conf
 
-    # =====================================================================
-    # CRITICAL: Start SNMP and wait for stabilization
-    # Some servers (especially cloud VPS) need extra time for the service
-    # =====================================================================
+    # Start SNMP service
     if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
         systemctl unmask snmpd >/dev/null 2>&1 || true
         systemctl enable snmpd >/dev/null 2>&1 || true
@@ -911,6 +925,71 @@ create_directories() {
     log "SUCCESS" "Directories created"
 }
 
+# =============================================================================
+# RSPAMD MONITORING SETUP
+# =============================================================================
+
+setup_rspamd_monitoring() {
+    if [[ "${HAS_RSPAMD}" != true ]] || [[ "${DRY_RUN}" == true ]]; then
+        return 0
+    fi
+
+    log "INFO" "Setting up Rspamd monitoring helpers..."
+
+    # Create the Rspamd stats helper script
+    cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
+#!/bin/bash
+# Rspamd Statistics Collector for MRTG
+# Handles permissions and timeouts gracefully
+
+# Try to get stats from rspamc with timeout
+STATS=$(timeout 5 rspamc -j stat 2>/dev/null)
+
+if [[ $? -eq 0 ]] && [[ -n "$STATS" ]]; then
+    # Parse JSON and return scanned/rejected counts
+    python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    scanned = data.get('scanned', 0)
+    rejected = data.get('actions', {}).get('reject', 0)
+    print(scanned)
+    print(rejected)
+except:
+    print('0')
+    print('0')
+" <<< "$STATS" 2>/dev/null || echo -e "0\n0"
+else
+    # Return zeros if Rspamd is down (prevents MRTG errors)
+    echo "0"
+    echo "0"
+fi
+EOF
+
+    chmod 755 "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
+
+    # =====================================================================
+    # CRITICAL: Fix Rspamd socket permissions
+    # Allow web user and snmp to access rspamd socket
+    # =====================================================================
+    if getent group rspamd >/dev/null; then
+        # Add users to rspamd group
+        usermod -aG rspamd "${WEB_USER}" >/dev/null 2>&1 || true
+        usermod -aG rspamd snmp >/dev/null 2>&1 || true
+        usermod -aG rspamd snmpd >/dev/null 2>&1 || true
+
+        # Fix rspamd socket permissions
+        if [[ -d /var/run/rspamd ]]; then
+            chmod 755 /var/run/rspamd
+            chown -R rspamd:rspamd /var/run/rspamd 2>/dev/null || true
+        fi
+
+        log "SUCCESS" "Rspamd group permissions fixed"
+    fi
+
+    log "SUCCESS" "Rspamd monitoring helpers installed"
+}
+
 generate_mrtg_config() {
     log "INFO" "Generating MRTG configuration..."
 
@@ -1022,7 +1101,7 @@ Options[processes]: growright, nopercent
 EOF
 
     # =====================================================================
-    # RSPAMD MONITORING (if detected)
+    # RSPAMD MONITORING
     # =====================================================================
     if [[ "${HAS_RSPAMD}" == true ]]; then
         log "INFO" "Adding Rspamd monitoring to configuration..."
@@ -1032,66 +1111,108 @@ EOF
 ########################################################################
 # Rspamd Email Filter Monitoring
 ########################################################################
-# This monitors total scanned messages vs rejected (spam) messages
-# Data is collected via SNMP extend script
 Target[rspamd]: \`${MRTG_SCRIPTS}/get_rspamd_stats.sh\`
-Title[rspamd]: Rspamd Email Statistics
-PageTop[rspamd]: <h1>Rspamd Mail Filter Statistics</h1>
+Title[rspamd]: Rspamd Mail Filter Statistics
+PageTop[rspamd]: <h1>Rspamd: Scanned vs Rejected</h1>
 MaxBytes[rspamd]: 1000000
 ShortLegend[rspamd]: msgs
 YLegend[rspamd]: Messages
-Legend1[rspamd]: Total Scanned
+Legend1[rspamd]: Scanned (Total)
 Legend2[rspamd]: Rejected (Spam)
-Legend3[rspamd]: Max Scanned
-Legend4[rspamd]: Max Rejected
 Options[rspamd]: growright, nopercent, gauge
-
-# Rspamd Learn Statistics (spam/ham learning)
-Target[rspamd_learn]: \`${MRTG_SCRIPTS}/get_rspamd_stats.sh --learn\`
-Title[rspamd_learn]: Rspamd Learning Statistics
-PageTop[rspamd_learn]: <h1>Rspamd Learning Activity</h1>
-MaxBytes[rspamd_learn]: 100000
-ShortLegend[rspamd_learn]: msgs
-YLegend[rspamd_learn]: Messages
-Legend1[rspamd_learn]: Spam Learnt
-Legend2[rspamd_learn]: Ham Learnt
-Options[rspamd_learn]: growright, nopercent, gauge
-
 EOF
-
-        # Create enhanced learning stats script if rspamd has learn counts
-        cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
-#!/bin/bash
-# Enhanced Rspamd Statistics Collector for MRTG
-
-# Parse command line arguments
-if [[ "$1" == "--learn" ]]; then
-    # Return learning statistics (spam/ham)
-    STATS=$(rspamc -j stat 2>/dev/null)
-    if [ $? -eq 0 ] && [ -n "$STATS" ]; then
-        SPAM_LEARNT=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('actions', {}).get('learn_spam', 0))" 2>/dev/null)
-        HAM_LEARNT=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('actions', {}).get('learn_ham', 0))" 2>/dev/null)
-        echo "${SPAM_LEARNT:-0}"
-        echo "${HAM_LEARNT:-0}"
-    else
-        echo -e "0\n0"
     fi
-else
-    # Return main statistics (scanned/rejected)
-    STATS=$(rspamc -j stat 2>/dev/null)
-    if [ $? -eq 0 ] && [ -n "$STATS" ]; then
-        SCANNED=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('scanned', 0))" 2>/dev/null)
-        REJECTED=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('actions', {}).get('reject', 0))" 2>/dev/null)
-        echo "${SCANNED:-0}"
-        echo "${REJECTED:-0}"
-    else
-        echo -e "0\n0"
-    fi
-fi
+
+    # =====================================================================
+    # MYSQL MONITORING
+    # =====================================================================
+    if [[ "${HAS_MYSQL}" == true ]]; then
+        log "INFO" "Adding MySQL monitoring to configuration..."
+
+        cat >> "${cfg_file}" << EOF
+
+########################################################################
+# MySQL Database Monitoring
+########################################################################
+Target[mysql]: \`echo "show global status like 'Questions';" | mysql -N | awk '{print \$2}' && echo "show global status like 'Slow_queries';" | mysql -N | awk '{print \$2}'\`
+Title[mysql]: MySQL Queries
+PageTop[mysql]: <h1>MySQL: Total vs Slow Queries</h1>
+MaxBytes[mysql]: 10000000
+ShortLegend[mysql]: queries
+YLegend[mysql]: Queries
+Legend1[mysql]: Total Queries
+Legend2[mysql]: Slow Queries
+Options[mysql]: growright, nopercent, gauge
 EOF
-        chmod +x "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
+    fi
 
-        log "SUCCESS" "Rspamd monitoring added to configuration"
+    # =====================================================================
+    # REDIS MONITORING
+    # =====================================================================
+    if [[ "${HAS_REDIS}" == true ]]; then
+        log "INFO" "Adding Redis monitoring to configuration..."
+
+        cat >> "${cfg_file}" << EOF
+
+########################################################################
+# Redis Cache Monitoring
+########################################################################
+Target[redis]: \`redis-cli info | grep -E '^(total_commands_processed|expired_keys):' | cut -d: -f2 | tr '\n' ' '\`
+Title[redis]: Redis Commands vs Expired Keys
+PageTop[redis]: <h1>Redis Cache Statistics</h1>
+MaxBytes[redis]: 10000000
+ShortLegend[redis]: ops
+YLegend[redis]: Operations
+Legend1[redis]: Total Commands
+Legend2[redis]: Expired Keys
+Options[redis]: growright, nopercent, gauge
+EOF
+    fi
+
+    # =====================================================================
+    # EXIM MONITORING
+    # =====================================================================
+    if [[ "${HAS_EXIM}" == true ]]; then
+        log "INFO" "Adding Exim monitoring to configuration..."
+
+        cat >> "${cfg_file}" << EOF
+
+########################################################################
+# Exim Mail Queue Monitoring
+########################################################################
+Target[exim_queue]: \`exim -bpc; exim -bp | grep -c '<'\`
+Title[exim_queue]: Exim Mail Queue
+PageTop[exim_queue]: <h1>Exim Mail Queue</h1>
+MaxBytes[exim_queue]: 10000
+ShortLegend[exim_queue]: msgs
+YLegend[exim_queue]: Messages
+Legend1[exim_queue]: Frozen Messages
+Legend2[exim_queue]: Total Queue
+Options[exim_queue]: growright, nopercent, gauge
+EOF
+    fi
+
+    # =====================================================================
+    # DOVECOT MONITORING
+    # =====================================================================
+    if [[ "${HAS_DOVECOT}" == true ]]; then
+        log "INFO" "Adding Dovecot monitoring to configuration..."
+
+        cat >> "${cfg_file}" << EOF
+
+########################################################################
+# Dovecot IMAP/POP3 Monitoring
+########################################################################
+Target[dovecot]: \`doveadm stats dump user | awk '{sum+=\\\$2} END {print sum}' && doveadm stats dump user | awk '{sum+=\\\$3} END {print sum}'\`
+Title[dovecot]: Dovecot Connections
+PageTop[dovecot]: <h1>Dovecot IMAP/POP3 Connections</h1>
+MaxBytes[dovecot]: 1000
+ShortLegend[dovecot]: conn
+YLegend[dovecot]: Connections
+Legend1[dovecot]: Active Connections
+Legend2[dovecot]: Total Sessions
+Options[dovecot]: growright, nopercent, gauge
+EOF
     fi
 
     log "SUCCESS" "Configuration saved to ${cfg_file}"
@@ -1262,7 +1383,6 @@ EOF
 
     # =====================================================================
     # DirectAdmin Permission Persistence
-    # diradmin must own files, but web server needs read access
     # =====================================================================
     if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
         log "INFO" "Setting DirectAdmin-specific permissions"
@@ -1307,13 +1427,13 @@ configure_panel_integration() {
             cat > "${mrtg_plugin}/plugin.conf" << EOF
 name=MRTG Network Monitor
 version=${SCRIPT_VERSION}
-desc=Enterprise network monitoring with Rspamd email filtering
+desc=Enterprise network monitoring with service detection
 url=/plugins/mrtg-monitor/admin/
 icon=graph.png
 level=admin
 EOF
 
-            # Admin interface with Rspamd info if detected
+            # Admin interface with service info
             cat > "${mrtg_plugin}/admin/index.html" << EOF
 <!DOCTYPE html>
 <html>
@@ -1323,11 +1443,11 @@ EOF
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
         .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
-        .content { background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .stats { display: flex; gap: 20px; margin-bottom: 20px; }
-        .stat-box { background: #f8f9fa; padding: 15px; border-radius: 5px; flex: 1; text-align: center; }
-        .stat-box h3 { margin: 0 0 10px 0; color: #666; }
+        .stats { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 20px; }
+        .stat-box { background: white; padding: 15px; border-radius: 5px; flex: 1 1 200px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .stat-box h3 { margin: 0 0 10px 0; color: #666; font-size: 14px; }
         .stat-box .value { font-size: 24px; font-weight: bold; color: #667eea; }
+        .content { background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         iframe { border: 1px solid #ddd; border-radius: 5px; background: white; width: 100%; height: 800px; }
     </style>
 </head>
@@ -1336,22 +1456,42 @@ EOF
         <h1>MRTG Network Monitor</h1>
         <p>DirectAdmin Integration | Version ${SCRIPT_VERSION}</p>
     </div>
-    <div class="content">
+
+    <div class="stats">
 EOF
 
-            # Add Rspamd stats if detected
+            # Add service status boxes
             if [[ "${HAS_RSPAMD}" == true ]]; then
                 cat >> "${mrtg_plugin}/admin/index.html" << EOF
-        <div class="stats">
-            <div class="stat-box">
-                <h3>Email Filter Status</h3>
-                <div class="value">Active</div>
-            </div>
+        <div class="stat-box">
+            <h3>Rspamd Email Filter</h3>
+            <div class="value">Active</div>
+        </div>
+EOF
+            fi
+
+            if [[ "${HAS_MYSQL}" == true ]]; then
+                cat >> "${mrtg_plugin}/admin/index.html" << EOF
+        <div class="stat-box">
+            <h3>MySQL/MariaDB</h3>
+            <div class="value">Active</div>
+        </div>
+EOF
+            fi
+
+            if [[ "${HAS_REDIS}" == true ]]; then
+                cat >> "${mrtg_plugin}/admin/index.html" << EOF
+        <div class="stat-box">
+            <h3>Redis Cache</h3>
+            <div class="value">Active</div>
         </div>
 EOF
             fi
 
             cat >> "${mrtg_plugin}/admin/index.html" << EOF
+    </div>
+
+    <div class="content">
         <iframe src="/mrtg/" frameborder="0"></iframe>
     </div>
 </body>
@@ -1384,7 +1524,6 @@ EOF
 
 # =============================================================================
 # CRITICAL: 3-PASS WARMUP FUNCTION
-# MRTG needs 3 runs to calculate rates and create all necessary files
 # =============================================================================
 initialize_mrtg() {
     log "INFO" "Initializing MRTG data collection (3-pass warmup)..."
@@ -1562,7 +1701,7 @@ verify_system_health() {
     done
     echo -e "  ${GREEN}✓${NC} Monitoring ${monitored} interfaces"
 
-    # 7. Rspamd Check (if installed)
+    # 7. Rspamd Check
     if [[ "${HAS_RSPAMD}" == true ]]; then
         echo -e "\n${BOLD}7. Rspamd Email Filter${NC}"
         if systemctl is-active --quiet rspamd 2>/dev/null; then
@@ -1570,11 +1709,12 @@ verify_system_health() {
 
             # Test Rspamd stats collection
             if [[ -x "${MRTG_SCRIPTS}/get_rspamd_stats.sh" ]]; then
-                local rspamd_test=$("${MRTG_SCRIPTS}/get_rspamd_stats.sh" 2>/dev/null)
-                if [[ -n "${rspamd_test}" ]] && [[ "${rspamd_test}" != "0\n0" ]]; then
+                local rspamd_test=$(timeout 3 "${MRTG_SCRIPTS}/get_rspamd_stats.sh" 2>/dev/null)
+                if [[ -n "${rspamd_test}" ]] && echo "${rspamd_test}" | grep -q '^[0-9]\+'; then
                     echo -e "  ${GREEN}✓${NC} Rspamd stats collecting"
                 else
-                    echo -e "  ${YELLOW}⚠${NC} Rspamd stats available but no data yet"
+                    echo -e "  ${YELLOW}⚠${NC} Rspamd stats unavailable - check socket permissions"
+                    ((warnings++))
                 fi
             fi
         else
@@ -1583,8 +1723,23 @@ verify_system_health() {
         fi
     fi
 
-    # 8. Firewall Status
-    echo -e "\n${BOLD}8. Firewall Configuration${NC}"
+    # 8. Service Status Summary
+    echo -e "\n${BOLD}8. Monitored Services${NC}"
+    local services=()
+    [[ "${HAS_RSPAMD}" == true ]] && services+=("Rspamd")
+    [[ "${HAS_MYSQL}" == true ]] && services+=("MySQL")
+    [[ "${HAS_REDIS}" == true ]] && services+=("Redis")
+    [[ "${HAS_EXIM}" == true ]] && services+=("Exim")
+    [[ "${HAS_DOVECOT}" == true ]] && services+=("Dovecot")
+
+    if [[ ${#services[@]} -gt 0 ]]; then
+        echo -e "  ${GREEN}✓${NC} Monitoring: ${services[*]}"
+    else
+        echo -e "  ${YELLOW}○${NC} No additional services detected"
+    fi
+
+    # 9. Firewall Status
+    echo -e "\n${BOLD}9. Firewall Configuration${NC}"
     if [[ -f /etc/csf/csf.conf ]]; then
         if grep -q "161" /etc/csf/csf.conf; then
             echo -e "  ${GREEN}✓${NC} CSF allows SNMP (port 161)"
@@ -1632,6 +1787,11 @@ repair_installation() {
         service snmpd restart
     fi
     sleep 5
+
+    # Fix Rspamd permissions if needed
+    if [[ "${HAS_RSPAMD}" == true ]]; then
+        setup_rspamd_monitoring
+    fi
 
     # Regenerate config
     generate_mrtg_config
@@ -1698,6 +1858,10 @@ Web Root: ${WEB_ROOT}
 SNMP: ${SNMP_COMMUNITY}
 Panel: ${PANEL_TYPE}
 Rspamd: ${HAS_RSPAMD}
+MySQL: ${HAS_MYSQL}
+Redis: ${HAS_REDIS}
+Exim: ${HAS_EXIM}
+Dovecot: ${HAS_DOVECOT}
 Interval: ${INTERVAL}
 EOF
 
@@ -1851,6 +2015,7 @@ This installer will:
   ✓ Set up automatic data collection
   ✓ Integrate with your control panel
   ✓ Monitor Rspamd email filter (if detected)
+  ✓ Monitor MySQL/MariaDB, Redis, Exim, Dovecot (if detected)
   ✓ NEVER modify your web server
 
 EOF
@@ -1861,6 +2026,10 @@ EOF
     detect_control_panel
     detect_web_server
     detect_rspamd
+    detect_mysql
+    detect_redis
+    detect_exim
+    detect_dovecot
 
     echo -e "\n${BOLD}Detected Configuration:${NC}"
     echo -e "  OS: ${GREEN}${OS_NAME} ${OS_VERSION}${NC}"
@@ -1872,8 +2041,16 @@ EOF
         echo -e "  Control Panel: ${GREEN}${PANEL_TYPE}${NC}"
     fi
 
-    if [[ "${HAS_RSPAMD}" == true ]]; then
-        echo -e "  Email Filter: ${GREEN}Rspamd detected - will be monitored${NC}"
+    # Show detected services
+    local services=()
+    [[ "${HAS_RSPAMD}" == true ]] && services+=("Rspamd")
+    [[ "${HAS_MYSQL}" == true ]] && services+=("MySQL")
+    [[ "${HAS_REDIS}" == true ]] && services+=("Redis")
+    [[ "${HAS_EXIM}" == true ]] && services+=("Exim")
+    [[ "${HAS_DOVECOT}" == true ]] && services+=("Dovecot")
+
+    if [[ ${#services[@]} -gt 0 ]]; then
+        echo -e "  Services: ${GREEN}${services[*]}${NC}"
     fi
 
     echo -e "\n${BOLD}Configuration:${NC}"
@@ -1890,7 +2067,7 @@ EOF
     echo -e "  Interval: ${INTERVAL} minutes"
     echo -e "  SNMP: ${SNMP_COMMUNITY:-"<auto-generated>"}"
     echo -e "  Email: ${DEFAULT_EMAIL}"
-    echo -e "  Rspamd Monitoring: ${HAS_RSPAMD}"
+    echo -e "  Services: ${#services[@]} detected"
     echo ""
 
     if ! confirm_action "Proceed with installation?"; then
@@ -1904,6 +2081,11 @@ EOF
     create_directories
     configure_snmp
     configure_firewall
+
+    if [[ "${HAS_RSPAMD}" == true ]]; then
+        setup_rspamd_monitoring
+    fi
+
     generate_mrtg_config
     setup_web_access
     configure_panel_integration
@@ -1922,6 +2104,10 @@ WEB_SERVER="${WEB_SERVER}"
 SNMP_COMMUNITY="${SNMP_COMMUNITY}"
 PANEL_TYPE="${PANEL_TYPE}"
 HAS_RSPAMD="${HAS_RSPAMD}"
+HAS_MYSQL="${HAS_MYSQL}"
+HAS_REDIS="${HAS_REDIS}"
+HAS_EXIM="${HAS_EXIM}"
+HAS_DOVECOT="${HAS_DOVECOT}"
 INTERVAL="${INTERVAL}"
 INSTALL_DATE="$(date)"
 SCRIPT_VERSION="${SCRIPT_VERSION}"
@@ -1939,8 +2125,8 @@ EOF
     echo -e "Configuration: ${CYAN}${MRTG_CONF}/mrtg.cfg${NC}"
     echo -e "Logs: ${CYAN}${MRTG_LOG}/mrtg.log${NC}"
 
-    if [[ "${HAS_RSPAMD}" == true ]]; then
-        echo -e "Rspamd Graphs: ${CYAN}http://${server_ip}/mrtg/rspamd.html${NC}"
+    if [[ ${#services[@]} -gt 0 ]]; then
+        echo -e "Monitored Services: ${CYAN}${services[*]}${NC}"
     fi
 
     echo ""
@@ -1985,11 +2171,19 @@ EOF
         3)
             detect_web_server
             detect_rspamd
+            detect_mysql
+            detect_redis
+            detect_exim
+            detect_dovecot
             verify_system_health
             ;;
         4)
             detect_web_server
             detect_rspamd
+            detect_mysql
+            detect_redis
+            detect_exim
+            detect_dovecot
             repair_installation
             ;;
         5) backup_config ;;
@@ -2059,7 +2253,7 @@ ${BOLD}OPTIONS${NC}
     --help, -h        Show this help
 
 ${BOLD}EXAMPLES${NC}
-    ${SCRIPT_NAME} --install      # Install MRTG with Rspamd monitoring
+    ${SCRIPT_NAME} --install      # Install MRTG with service monitoring
     ${SCRIPT_NAME} --status       # Check system health
     ${SCRIPT_NAME} --repair       # Fix common issues
     ${SCRIPT_NAME} --update       # Update script from GitHub
@@ -2105,12 +2299,20 @@ main() {
                 check_root
                 detect_web_server
                 detect_rspamd
+                detect_mysql
+                detect_redis
+                detect_exim
+                detect_dovecot
                 verify_system_health
                 ;;
             --repair|-r)
                 check_root
                 detect_web_server
                 detect_rspamd
+                detect_mysql
+                detect_redis
+                detect_exim
+                detect_dovecot
                 repair_installation
                 ;;
             --backup|-b)
