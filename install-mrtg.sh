@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v2.0.0
+# MRTG Professional Monitoring Suite - Enterprise Edition v2.1.0
 # Production-Hardened Network Monitoring for Hosting Environments
-# With Advanced Service Detection & Socket-Aware Monitoring
+# With Advanced Service Detection & Enterprise-Grade Optimizations
 #
 # =============================================================================
 # ██╗    ██╗ █████╗ ███████╗██╗         ██╗███████╗ █████╗
@@ -15,19 +15,22 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v2.0.0
+# Version:     v2.1.0
 # Build Date:  02/27/2026
 # License:     MIT
 #
 # DESCRIPTION:
-#   Zero-assumption MRTG installer for production hosting environments
-#   - Detects and works with ANY existing web server
-#   - Full DirectAdmin/cPanel/Plesk integration with proper plugin flags
+#   The definitive MRTG installer for production hosting environments
+#   - Zero-assumption architecture works with ANY existing setup
+#   - Full DirectAdmin/cPanel/Plesk integration with native plugins
 #   - Smart CSF firewall configuration with syntax safety
-#   - 3-pass warmup to eliminate first-run errors
+#   - 3-pass warmup with validation to eliminate first-run errors
 #   - SNMP stabilization delay for slow servers
 #   - Socket-aware service detection (MySQL, Rspamd, etc.)
 #   - Process lockfile to prevent cron race conditions
+#   - Automated log rotation to prevent disk exhaustion
+#   - Timeout-protected Rspamd polling for busy mail servers
+#   - Deep MySQL thread monitoring for connection analysis
 #   - Complete uninstall with rollback
 #   - Real-time health monitoring
 #   - Automatic updates from GitHub
@@ -57,7 +60,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v2.0.0"
+readonly SCRIPT_VERSION="v2.1.0"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -1014,24 +1017,23 @@ create_directories() {
 }
 
 # =============================================================================
-# RSPAMD MONITORING SETUP
+# RSPAMD MONITORING SETUP (with timeout protection)
 # =============================================================================
-
 setup_rspamd_monitoring() {
     if [[ "${HAS_RSPAMD}" != true ]] || [[ "${DRY_RUN}" == true ]]; then
         return 0
     fi
 
-    log "INFO" "Setting up Rspamd monitoring helpers..."
+    log "INFO" "Setting up Rspamd monitoring helpers with timeout protection..."
 
-    # Create the Rspamd stats helper script with proper error handling
+    # Create the Rspamd stats helper script with timeout and retry logic
     cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
 #!/bin/bash
-# Rspamd Statistics Collector for MRTG
-# Handles permissions, timeouts, and socket issues gracefully
+# Rspamd Statistics Collector for MRTG v2.1.0
+# Handles timeouts, permissions, and socket issues gracefully
 
-# Use timeout to prevent hanging (max 3 seconds)
-STATS=$(timeout 3 rspamc -j stat 2>/dev/null)
+# Query with 2-second timeout to prevent hanging
+STATS=$(timeout 2 rspamc -j stat 2>/dev/null)
 
 if [[ $? -eq 0 ]] && [[ -n "$STATS" ]]; then
     # Parse JSON and return scanned/rejected counts
@@ -1064,8 +1066,7 @@ EOF
     chmod 755 "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
 
     # =====================================================================
-    # CRITICAL: Fix Rspamd socket permissions (already added users in detect)
-    # Also fix socket directory permissions
+    # CRITICAL: Fix Rspamd socket permissions
     # =====================================================================
     if [[ -d /var/run/rspamd ]]; then
         chmod 755 /var/run/rspamd
@@ -1084,7 +1085,7 @@ EOF
         log "DEBUG" "Created systemd drop-in for rspamd socket permissions"
     fi
 
-    log "SUCCESS" "Rspamd monitoring helpers installed"
+    log "SUCCESS" "Rspamd monitoring helpers installed with timeout protection"
 }
 
 generate_mrtg_config() {
@@ -1221,22 +1222,24 @@ EOF
     fi
 
     # =====================================================================
-    # MYSQL MONITORING (Socket-Aware)
+    # MYSQL MONITORING (Socket-Aware with Thread Metrics)
     # =====================================================================
     if [[ "${HAS_MYSQL}" == true ]]; then
         log "INFO" "Adding MySQL monitoring to configuration..."
 
         # Build MySQL command with socket if available
         local mysql_cmd="mysql"
+        local mysqladmin_cmd="mysqladmin"
         if [[ -n "${MYSQL_SOCKET}" ]]; then
             mysql_cmd="mysql --socket=${MYSQL_SOCKET}"
+            mysqladmin_cmd="mysqladmin --socket=${MYSQL_SOCKET}"
             log "INFO" "Using MySQL socket: ${MYSQL_SOCKET}"
         fi
 
         cat >> "${cfg_file}" << EOF
 
 ########################################################################
-# MySQL Database Monitoring
+# MySQL Database Monitoring - Query Statistics
 ########################################################################
 Target[mysql]: \`${mysql_cmd} -e "show global status like 'Questions';" -N 2>/dev/null | awk '{print \$2}' || echo 0; ${mysql_cmd} -e "show global status like 'Slow_queries';" -N 2>/dev/null | awk '{print \$2}' || echo 0\`
 Title[mysql]: MySQL Queries
@@ -1247,6 +1250,19 @@ YLegend[mysql]: Queries
 Legend1[mysql]: Total Queries
 Legend2[mysql]: Slow Queries
 Options[mysql]: growright, nopercent, gauge
+
+########################################################################
+# MySQL Connection Thread Monitoring
+########################################################################
+Target[mysql_conns]: \`${mysqladmin_cmd} status 2>/dev/null | awk '{print \$4; print \$10}' || echo "0\n0"\`
+Title[mysql_conns]: MySQL Connections vs Running
+PageTop[mysql_conns]: <h1>MySQL Connection Threads</h1>
+MaxBytes[mysql_conns]: 5000
+ShortLegend[mysql_conns]: conns
+YLegend[mysql_conns]: Connections
+Legend1[mysql_conns]: Total Connections
+Legend2[mysql_conns]: Running Threads
+Options[mysql_conns]: growright, nopercent, gauge
 EOF
     fi
 
@@ -1388,6 +1404,36 @@ EOF
 }
 
 # =============================================================================
+# CRITICAL: LOGROTATE CONFIGURATION
+# =============================================================================
+setup_logrotate() {
+    log "INFO" "Configuring log rotation for MRTG logs..."
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would configure logrotate for ${MRTG_LOG}"
+        return 0
+    fi
+
+    cat > /etc/logrotate.d/mrtg << EOF
+${MRTG_LOG}/*.log {
+    weekly
+    missingok
+    rotate 4
+    compress
+    notifempty
+    create 0644 root root
+    sharedscripts
+    postrotate
+        # Restart MRTG if needed (though it's cron-based)
+        [ -f /var/run/mrtg_cron.lock ] && rm -f /var/run/mrtg_cron.lock
+    endscript
+}
+EOF
+
+    log "SUCCESS" "Logrotate configured for MRTG logs"
+}
+
+# =============================================================================
 # CRITICAL: CRON SETUP WITH LOCKFILE TO PREVENT RACE CONDITIONS
 # =============================================================================
 setup_cron() {
@@ -1401,7 +1447,7 @@ setup_cron() {
     # Create runner script with lockfile to prevent overlapping executions
     cat > "${MRTG_BIN}/run-mrtg.sh" << 'EOF'
 #!/bin/bash
-# MRTG Runner - Generated by MRTG Professional Suite v2.0.0
+# MRTG Runner - Generated by MRTG Professional Suite v2.1.0
 # Includes lockfile to prevent race conditions on high-traffic servers
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -1460,6 +1506,13 @@ done
 # Generate index
 log_message "Generating index"
 /usr/bin/indexmaker "${MRTG_CONF}/mrtg.cfg" --output="${WEB_DIR}/index.html"
+
+# Verify index was generated correctly
+if [[ -f "${WEB_DIR}/index.html" ]] && grep -q "MRTG" "${WEB_DIR}/index.html" 2>/dev/null; then
+    log_message "Index page verified"
+else
+    log_message "WARNING: Index page may be incomplete"
+fi
 
 # Set permissions
 chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_DIR}" 2>/dev/null || true
@@ -1550,7 +1603,7 @@ EOF
 }
 
 # =============================================================================
-# DIRECTADMIN PLUGIN INTEGRATION (with proper DA flags)
+# DIRECTADMIN PLUGIN INTEGRATION (with native plugin structure)
 # =============================================================================
 configure_panel_integration() {
     if [[ "${PANEL_TYPE}" == "none" ]] || [[ "${DRY_RUN}" == true ]]; then
@@ -1562,11 +1615,12 @@ configure_panel_integration() {
     case "${PANEL_TYPE}" in
         "directadmin")
             local da_plugins="/usr/local/directadmin/plugins"
-            local mrtg_plugin="${da_plugins}/mrtg-monitor"
+            local mrtg_plugin="${da_plugins}/mrtg"
 
             mkdir -p "${mrtg_plugin}/admin"
             mkdir -p "${mrtg_plugin}/data"
             mkdir -p "${mrtg_plugin}/hooks"
+            mkdir -p "${mrtg_plugin}/images"
 
             # =================================================================
             # CRITICAL: DirectAdmin plugin.conf with all required flags
@@ -1575,17 +1629,23 @@ configure_panel_integration() {
 # DirectAdmin Plugin Configuration
 # Generated by MRTG Professional Suite v${SCRIPT_VERSION}
 
-name=mrtg-monitor
-id=mrtg-monitor
+name=MRTG Suite
+id=mrtg
 version=${SCRIPT_VERSION}
 desc=Enterprise network monitoring with service detection
-url=/plugins/mrtg-monitor/admin/
-icon=graph.png
+url=/plugins/mrtg/admin/
+icon=images/mrtg_icon.png
 level=admin
+category=admin
 active=yes
 installed=yes
 author=${SCRIPT_AUTHOR}
 update_url=${REPO_URL}
+EOF
+
+            # Create a simple icon (base64 encoded 1x1 transparent PNG as fallback)
+            cat > "${mrtg_plugin}/images/mrtg_icon.png" << 'EOF'
+iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTsfm/wAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAH2SURBVDiNjZI9T9tQFIaf6+vYxIQECQhRNyhSpC5dmjIUqUtXJP6A/AJ26V/oxA9AomN3FrZ27MxWqRIDDEh8fM+xS0mI05E+0zvdc86rI0op/ie01uRyOQqFAq1Wi/PzcxRFUVVV5ubmaDab+L7P8PAw4+PjFAoF5ufnkVJyf3/P4eEhuVyO1dVVFhYWODw8ZGdnh1gsRiqVYnFxkXq9TqPRoNFo4DgOnU6HWCxGpVLBMAx838d1XUqlEpeXl+zv79NqtQjDkFwux9LSErOzs5yenlKpVEgkEjQaDWzbJp1Oo5RidHSUWCyGbdvkcjlarRaWZXF7e4vnebTbbdrtNvl8nqGhIaSUlMtlPM9jYmKCUqnE0dERjuMQRRGWZTE1NcXDwwMnJyek02l832d8fJzh4WFUVVEUheF4HIZh4DgOc3NzxONxXNel2WxSKBRoNpsUi0Vs26ZQKHB2doaUklgshlIKrTVaa6SUWJZFrVYjDENs2yaTyRBFEaOjo0RRRBRF+L7P6OgojuMQhiFaa4QQQoUQQgghhBAiBEEghBAiCIIwjmMhYowxQggBICJExBhjjDHGmBACEMYYI4QQQggBEEL8W1EUhRBCiP8uiiIhhBARQggRhqEQQkQIIUSE1loopYQQQkQppXAcB8dxSCaT+L6P1hrHcUgmk7iui1IKz/NIJpO4rovWmpubG6anp3l+fiYIAkZHR0kmk7iuS6vVYnJykvbLC+fn57TbbTzPY2hoiEKhQKvV4ubmhv8Ck0dn3scT1hQAAAAASUVORK5CYII=
 EOF
 
             # Create plugin admin page with service detection
@@ -1660,7 +1720,7 @@ EOF
                 chmod 644 "${mrtg_plugin}/plugin.conf"
             fi
 
-            log "SUCCESS" "DirectAdmin plugin installed with all required flags"
+            log "SUCCESS" "DirectAdmin plugin installed with native structure"
             ;;
 
         "cpanel")
@@ -1680,7 +1740,7 @@ EOF
 }
 
 # =============================================================================
-# CRITICAL: 3-PASS WARMUP FUNCTION
+# CRITICAL: 3-PASS WARMUP FUNCTION WITH VALIDATION
 # =============================================================================
 initialize_mrtg() {
     log "INFO" "Initializing MRTG data collection (3-pass warmup)..."
@@ -1718,6 +1778,15 @@ initialize_mrtg() {
     log "INFO" "Generating index page..."
     local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
     ${indexmaker_path} "${cfg_file}" --output="${WEB_MRTG_DIR}/index.html"
+
+    # =====================================================================
+    # CRITICAL: Verify index page was generated correctly
+    # =====================================================================
+    if [[ -f "${WEB_MRTG_DIR}/index.html" ]] && grep -q "MRTG" "${WEB_MRTG_DIR}/index.html" 2>/dev/null; then
+        log "SUCCESS" "Index page verified - contains MRTG content"
+    else
+        log "WARNING" "Index page may be incomplete - check configuration"
+    fi
 
     # Set permissions
     if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
@@ -1801,8 +1870,17 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # 4. Data Collection
-    echo -e "\n${BOLD}4. Data Collection${NC}"
+    # 4. Logrotate Configuration
+    echo -e "\n${BOLD}4. Log Maintenance${NC}"
+    if [[ -f /etc/logrotate.d/mrtg ]]; then
+        echo -e "  ${GREEN}✓${NC} Logrotate configured for MRTG logs"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Logrotate not configured"
+        ((warnings++))
+    fi
+
+    # 5. Data Collection
+    echo -e "\n${BOLD}5. Data Collection${NC}"
     if [[ -f "${MRTG_LOG}/mrtg.log" ]]; then
         local log_size=$(stat -c%s "${MRTG_LOG}/mrtg.log" 2>/dev/null || stat -f%z "${MRTG_LOG}/mrtg.log" 2>/dev/null)
         local last_mod=$(stat -c%Y "${MRTG_LOG}/mrtg.log" 2>/dev/null || stat -f%m "${MRTG_LOG}/mrtg.log" 2>/dev/null)
@@ -1827,8 +1905,8 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # 5. Web Interface
-    echo -e "\n${BOLD}5. Web Interface${NC}"
+    # 6. Web Interface
+    echo -e "\n${BOLD}6. Web Interface${NC}"
     if [[ -d "${WEB_MRTG_DIR}" ]]; then
         echo -e "  ${GREEN}✓${NC} Web directory exists"
 
@@ -1842,6 +1920,14 @@ verify_system_health() {
 
         if [[ -f "${WEB_MRTG_DIR}/index.html" ]]; then
             echo -e "  ${GREEN}✓${NC} Index page exists"
+
+            # Verify index content
+            if grep -q "MRTG" "${WEB_MRTG_DIR}/index.html" 2>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} Index page contains valid MRTG content"
+            else
+                echo -e "  ${YELLOW}⚠${NC} Index page may be invalid"
+                ((warnings++))
+            fi
         else
             echo -e "  ${YELLOW}⚠${NC} Index page missing"
             ((warnings++))
@@ -1859,8 +1945,8 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # 6. Network Interfaces
-    echo -e "\n${BOLD}6. Network Interfaces${NC}"
+    # 7. Network Interfaces
+    echo -e "\n${BOLD}7. Network Interfaces${NC}"
     local interfaces=($(detect_network_interfaces))
     echo -e "  ${GREEN}✓${NC} Detected ${#interfaces[@]} active interfaces"
     local monitored=0
@@ -1871,17 +1957,17 @@ verify_system_health() {
     done
     echo -e "  ${GREEN}✓${NC} Monitoring ${monitored} interfaces"
 
-    # 7. Rspamd Check
+    # 8. Rspamd Check
     if [[ "${HAS_RSPAMD}" == true ]]; then
-        echo -e "\n${BOLD}7. Rspamd Email Filter${NC}"
+        echo -e "\n${BOLD}8. Rspamd Email Filter${NC}"
         if systemctl is-active --quiet rspamd 2>/dev/null || pgrep rspamd >/dev/null; then
             echo -e "  ${GREEN}✓${NC} Rspamd service running"
 
-            # Test Rspamd stats collection
+            # Test Rspamd stats collection with timeout
             if [[ -x "${MRTG_SCRIPTS}/get_rspamd_stats.sh" ]]; then
                 local rspamd_test=$(timeout 3 "${MRTG_SCRIPTS}/get_rspamd_stats.sh" 2>/dev/null)
                 if [[ -n "${rspamd_test}" ]] && echo "${rspamd_test}" | grep -q '^[0-9]\+'; then
-                    echo -e "  ${GREEN}✓${NC} Rspamd stats collecting"
+                    echo -e "  ${GREEN}✓${NC} Rspamd stats collecting (timeout-protected)"
 
                     # Check if user is in rspamd group
                     if id "${WEB_USER}" | grep -q rspamd; then
@@ -1898,19 +1984,31 @@ verify_system_health() {
         fi
     fi
 
-    # 8. MySQL Socket Check
+    # 9. MySQL Socket and Thread Check
     if [[ "${HAS_MYSQL}" == true ]]; then
-        echo -e "\n${BOLD}8. MySQL/MariaDB${NC}"
+        echo -e "\n${BOLD}9. MySQL/MariaDB${NC}"
         if detect_mysql_socket; then
             echo -e "  ${GREEN}✓${NC} MySQL socket found: ${MYSQL_SOCKET}"
+
+            # Test thread monitoring
+            local mysqladmin_cmd="mysqladmin"
+            if [[ -n "${MYSQL_SOCKET}" ]]; then
+                mysqladmin_cmd="mysqladmin --socket=${MYSQL_SOCKET}"
+            fi
+
+            if ${mysqladmin_cmd} status >/dev/null 2>&1; then
+                echo -e "  ${GREEN}✓${NC} Thread monitoring available"
+            else
+                echo -e "  ${YELLOW}⚠${NC} Thread monitoring may be limited"
+            fi
         else
             echo -e "  ${YELLOW}⚠${NC} MySQL detected but no socket found - using TCP"
             ((warnings++))
         fi
     fi
 
-    # 9. Service Status Summary
-    echo -e "\n${BOLD}9. Monitored Services${NC}"
+    # 10. Service Status Summary
+    echo -e "\n${BOLD}10. Monitored Services${NC}"
     local services=()
     [[ "${HAS_RSPAMD}" == true ]] && services+=("Rspamd")
     [[ "${HAS_MYSQL}" == true ]] && services+=("MySQL")
@@ -1924,8 +2022,8 @@ verify_system_health() {
         echo -e "  ${YELLOW}○${NC} No additional services detected"
     fi
 
-    # 10. Firewall Status
-    echo -e "\n${BOLD}10. Firewall Configuration${NC}"
+    # 11. Firewall Status
+    echo -e "\n${BOLD}11. Firewall Configuration${NC}"
     if [[ -f /etc/csf/csf.conf ]]; then
         if grep -q "161" /etc/csf/csf.conf; then
             echo -e "  ${GREEN}✓${NC} CSF allows SNMP (port 161)"
@@ -1988,6 +2086,11 @@ repair_installation() {
     # Fix cron if missing
     if ! crontab -l 2>/dev/null | grep -q "run-mrtg.sh"; then
         setup_cron
+    fi
+
+    # Fix logrotate if missing
+    if [[ ! -f /etc/logrotate.d/mrtg ]]; then
+        setup_logrotate
     fi
 
     # Fix permissions
@@ -2126,6 +2229,7 @@ uninstall_mrtg() {
         echo -e "  - /etc/snmp/snmpd.conf"
         echo -e "  - MRTG cron jobs"
         echo -e "  - DirectAdmin plugin (if installed)"
+        echo -e "  - Logrotate configuration"
         echo ""
 
         if ! confirm_action "Continue with uninstall?"; then
@@ -2141,10 +2245,16 @@ uninstall_mrtg() {
     log "INFO" "Removing cron..."
     crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab -
 
+    # Remove logrotate
+    if [[ -f /etc/logrotate.d/mrtg ]]; then
+        log "INFO" "Removing logrotate configuration..."
+        rm -f /etc/logrotate.d/mrtg
+    fi
+
     # Remove DirectAdmin plugin
-    if [[ -d "/usr/local/directadmin/plugins/mrtg-monitor" ]]; then
+    if [[ -d "/usr/local/directadmin/plugins/mrtg" ]]; then
         log "INFO" "Removing DirectAdmin plugin..."
-        rm -rf "/usr/local/directadmin/plugins/mrtg-monitor"
+        rm -rf "/usr/local/directadmin/plugins/mrtg"
     fi
 
     # Remove packages?
@@ -2200,9 +2310,10 @@ This installer will:
   ✓ Detect your existing web server
   ✓ Configure secure SNMP monitoring
   ✓ Set up automatic data collection with lockfile protection
-  ✓ Integrate with your control panel
-  ✓ Monitor Rspamd email filter (if detected)
-  ✓ Monitor MySQL/MariaDB with socket detection
+  ✓ Configure log rotation for maintenance-free operation
+  ✓ Integrate with your control panel as a native plugin
+  ✓ Monitor Rspamd email filter with timeout protection
+  ✓ Monitor MySQL/MariaDB with thread analysis
   ✓ Monitor Redis, Exim, Dovecot (if detected)
   ✓ NEVER modify your web server
 
@@ -2256,6 +2367,7 @@ EOF
     echo -e "  SNMP: ${SNMP_COMMUNITY:-"<auto-generated>"}"
     echo -e "  Email: ${DEFAULT_EMAIL}"
     echo -e "  Services: ${#services[@]} detected"
+    echo -e "  Log Rotation: Weekly (auto-configured)"
     echo ""
 
     if ! confirm_action "Proceed with installation?"; then
@@ -2278,6 +2390,7 @@ EOF
     setup_web_access
     configure_panel_integration
     setup_cron
+    setup_logrotate
     initialize_mrtg
 
     # Save config
@@ -2312,6 +2425,7 @@ EOF
     echo -e "SNMP Community: ${YELLOW}${SNMP_COMMUNITY}${NC} (keep secure!)"
     echo -e "Configuration: ${CYAN}${MRTG_CONF}/mrtg.cfg${NC}"
     echo -e "Logs: ${CYAN}${MRTG_LOG}/mrtg.log${NC}"
+    echo -e "Log Rotation: ${CYAN}/etc/logrotate.d/mrtg${NC}"
 
     if [[ ${#services[@]} -gt 0 ]]; then
         echo -e "Monitored Services: ${CYAN}${services[*]}${NC}"
@@ -2441,7 +2555,7 @@ ${BOLD}OPTIONS${NC}
     --help, -h        Show this help
 
 ${BOLD}EXAMPLES${NC}
-    ${SCRIPT_NAME} --install      # Install MRTG with service monitoring
+    ${SCRIPT_NAME} --install      # Install MRTG with all service monitoring
     ${SCRIPT_NAME} --status       # Check system health
     ${SCRIPT_NAME} --repair       # Fix common issues
     ${SCRIPT_NAME} --update       # Update script from GitHub
