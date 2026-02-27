@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v1.5.0
-# Production-Ready Network Monitoring for Hosting Environments
+# MRTG Professional Monitoring Suite - Enterprise Edition v1.6.0
+# Production-Hardened Network Monitoring for Hosting Environments
 #
 # =============================================================================
 # ██╗    ██╗ █████╗ ███████╗██╗         ██╗███████╗ █████╗
@@ -14,7 +14,7 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v1.5.0
+# Version:     v1.6.0
 # Build Date:  02/27/2026
 # License:     MIT
 #
@@ -22,7 +22,9 @@
 #   Zero-assumption MRTG installer for production hosting environments
 #   - Detects and works with ANY existing web server (Apache/Nginx/LiteSpeed)
 #   - Full DirectAdmin/cPanel/Plesk integration
-#   - Smart CSF/firewalld/UFW configuration
+#   - Smart CSF/firewalld/UFW configuration with syntax safety
+#   - 3-pass warmup to eliminate first-run errors
+#   - SNMP stabilization delay for slow servers
 #   - Complete uninstall with rollback
 #   - Real-time health monitoring
 #   - Automatic updates from GitHub
@@ -51,7 +53,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v1.5.0"
+readonly SCRIPT_VERSION="v1.6.0"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -181,7 +183,7 @@ self_update() {
         return 1
     fi
 
-    # Check if download was successful and file exists
+    # Check if download was successful
     if [[ ! -s "${tmp_file}" ]]; then
         log "ERROR" "Downloaded file is empty"
         rm -f "${tmp_file}"
@@ -216,12 +218,6 @@ self_update() {
         log "SUCCESS" "Updated to version ${new_ver}"
         log "INFO" "Backup saved to: ${backup_file}"
         rm -f "${tmp_file}"
-
-        # Show changelog or differences
-        if command -v diff >/dev/null 2>&1; then
-            echo -e "\n${BOLD}Changes since ${current_ver}:${NC}"
-            diff -u <(grep -v '^#' "${backup_file}" | head -50) <(grep -v '^#' "$0" | head -50) 2>/dev/null || true
-        fi
 
         echo -e "\n${GREEN}Please restart the script to use the new version.${NC}"
         exit 0
@@ -351,7 +347,7 @@ detect_web_server() {
         WEB_USER="diradmin"
         WEB_GROUP="diradmin"
         if [[ -z "${WEB_SERVER}" ]] || [[ "${WEB_SERVER}" == "unknown" ]]; then
-            WEB_SERVER="apache"  # DirectAdmin uses Apache
+            WEB_SERVER="apache"
         fi
     elif [[ "${PANEL_TYPE}" == "cpanel" ]]; then
         WEB_USER="apache"
@@ -522,7 +518,7 @@ detect_ip_address() {
 }
 
 # =============================================================================
-# INSTALLATION FUNCTIONS
+# PRODUCTION-HARDENED INSTALLATION FUNCTIONS
 # =============================================================================
 
 install_dependencies() {
@@ -683,9 +679,10 @@ EOF
         service snmpd restart
     fi
 
-    # Wait for SNMP to initialize
-    log "INFO" "Waiting for SNMP to initialize..."
-    sleep 5
+    # CRITICAL: Wait for SNMP to fully initialize
+    # Some servers (especially cloud VPS) need extra time for the service to bind
+    log "INFO" "Waiting for SNMP to stabilize (3 seconds)..."
+    sleep 3
 
     # Verify SNMP is working
     local max_attempts=5
@@ -697,7 +694,7 @@ EOF
                 break
             fi
         fi
-        log "INFO" "Waiting for SNMP (attempt ${attempt}/${max_attempts})..."
+        log "INFO" "Waiting for SNMP response (attempt ${attempt}/${max_attempts})..."
         sleep 2
         ((attempt++))
     done
@@ -717,52 +714,84 @@ configure_firewall() {
 
     local firewall_configured=false
 
-    # CSF (ConfigServer Firewall) - Common in hosting
+    # =====================================================================
+    # CSF (ConfigServer Firewall) - Common in DirectAdmin/cPanel
+    # SAFE HANDLING: Avoid double commas and syntax errors
+    # =====================================================================
     if [[ -f /etc/csf/csf.conf ]]; then
-        log "INFO" "CSF firewall detected"
+        log "INFO" "CSF firewall detected - applying safe configuration"
 
         # Backup CSF config
         cp /etc/csf/csf.conf "/etc/csf/csf.conf.backup.$(date +%Y%m%d-%H%M%S)"
 
-        # Add UDP ports safely
-        for port_type in "UDP_IN" "UDP_OUT"; do
-            local current=$(grep "^${port_type} =" /etc/csf/csf.conf | cut -d'"' -f2)
+        local csf_modified=false
 
-            if [[ -z "${current}" ]]; then
-                # Empty string case
-                sed -i "s/^${port_type} = \"\"/${port_type} = \"161\"/" /etc/csf/csf.conf
-                log "INFO" "Set ${port_type} to \"161\""
-            elif ! echo "${current}" | grep -q "161"; then
-                # Add to existing list
-                sed -i "s/^${port_type} = \"${current}\"/${port_type} = \"${current},161\"/" /etc/csf/csf.conf
-                log "INFO" "Added 161 to ${port_type}"
+        # Process UDP_IN and UDP_OUT safely
+        for port_type in "UDP_IN" "UDP_OUT"; do
+            # Check if port 161 is already present
+            if ! grep -q "161" /etc/csf/csf.conf; then
+                # Get current value
+                local current=$(grep "^${port_type} =" /etc/csf/csf.conf | cut -d'"' -f2)
+
+                # Case 1: Empty string - just set to "161"
+                if [[ -z "${current}" ]]; then
+                    sed -i "s/^${port_type} = \"\"/${port_type} = \"161\"/" /etc/csf/csf.conf
+                    log "INFO" "Set ${port_type} to \"161\""
+                    csf_modified=true
+
+                # Case 2: Non-empty string - add to beginning with comma
+                else
+                    # Add to beginning to avoid trailing comma issues
+                    sed -i "s/^${port_type} = \"${current}\"/${port_type} = \"161,${current}\"/" /etc/csf/csf.conf
+                    log "INFO" "Added 161 to ${port_type}"
+                    csf_modified=true
+                fi
             fi
         done
 
-        # Restart CSF
-        csf -r >/dev/null 2>&1
+        # Only restart CSF if changes were made
+        if [[ "${csf_modified}" == true ]]; then
+            csf -r >/dev/null 2>&1
+            log "SUCCESS" "CSF restarted with new rules"
+        else
+            log "INFO" "CSF already allows SNMP"
+        fi
+
         firewall_configured=true
-        log "SUCCESS" "CSF configured"
     fi
 
-    # Firewalld
+    # =====================================================================
+    # Firewalld (RHEL/CentOS/Alma/Rocky)
+    # =====================================================================
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
         log "INFO" "Firewalld detected"
-        firewall-cmd --permanent --add-service=snmp
-        firewall-cmd --reload >/dev/null
+        if ! firewall-cmd --list-services --permanent | grep -q "snmp"; then
+            firewall-cmd --permanent --add-service=snmp
+            firewall-cmd --reload >/dev/null
+            log "SUCCESS" "Firewalld configured"
+        else
+            log "INFO" "SNMP already allowed in firewalld"
+        fi
         firewall_configured=true
-        log "SUCCESS" "Firewalld configured"
     fi
 
-    # UFW
+    # =====================================================================
+    # UFW (Ubuntu/Debian)
+    # =====================================================================
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
         log "INFO" "UFW detected"
-        ufw allow snmp >/dev/null 2>&1
+        if ! ufw status | grep -q "161"; then
+            ufw allow snmp >/dev/null 2>&1
+            log "SUCCESS" "UFW configured"
+        else
+            log "INFO" "SNMP already allowed in UFW"
+        fi
         firewall_configured=true
-        log "SUCCESS" "UFW configured"
     fi
 
+    # =====================================================================
     # iptables (fallback)
+    # =====================================================================
     if [[ "${firewall_configured}" == false ]] && command -v iptables >/dev/null 2>&1; then
         log "INFO" "Configuring iptables"
 
@@ -835,8 +864,9 @@ generate_mrtg_config() {
         return 0
     fi
 
-    # Wait for SNMP
-    sleep 3
+    # Ensure SNMP is ready
+    log "INFO" "Verifying SNMP is responsive..."
+    sleep 2
 
     # Try cfgmaker with retries
     local cfg_success=false
@@ -855,18 +885,22 @@ generate_mrtg_config() {
             "${SNMP_COMMUNITY}@127.0.0.1" > "${cfg_file}.tmp" 2>/dev/null; then
 
             if [[ -s "${cfg_file}.tmp" ]]; then
-                mv "${cfg_file}.tmp" "${cfg_file}"
-                cfg_success=true
-                log "SUCCESS" "Configuration generated"
-                break
+                # Check if it actually contains interface data
+                if grep -q "Target\[" "${cfg_file}.tmp"; then
+                    mv "${cfg_file}.tmp" "${cfg_file}"
+                    cfg_success=true
+                    log "SUCCESS" "Configuration generated with $(grep -c "Target\[" "${cfg_file}") interfaces"
+                    break
+                fi
             fi
         fi
+        log "INFO" "Retrying in 2 seconds..."
         sleep 2
     done
 
     # Fallback to template
     if [[ "${cfg_success}" != true ]]; then
-        log "WARNING" "Using template configuration"
+        log "WARNING" "cfgmaker failed - using template configuration"
         generate_template_config "${cfg_file}"
     fi
 
@@ -1092,9 +1126,30 @@ User-agent: *
 Disallow: /
 EOF
 
-    # Set permissions
-    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
-    chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+    # =====================================================================
+    # DirectAdmin Permission Persistence
+    # diradmin must own files, but web server needs read access
+    # =====================================================================
+    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
+        log "INFO" "Setting DirectAdmin-specific permissions"
+
+        # Ensure diradmin owns everything
+        if id diradmin >/dev/null 2>&1; then
+            chown -R diradmin:diradmin "${WEB_MRTG_DIR}"
+        fi
+
+        # Set 755 on directory so web server can read
+        chmod 755 "${WEB_MRTG_DIR}"
+
+        # Set 644 on files
+        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \;
+
+        log "SUCCESS" "DirectAdmin permissions set"
+    else
+        # Standard permissions
+        chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
+        chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+    fi
 
     log "SUCCESS" "Web access configured"
 }
@@ -1174,33 +1229,60 @@ EOF
     esac
 }
 
+# =============================================================================
+# CRITICAL: 3-PASS WARMUP FUNCTION
+# MRTG needs 3 runs to calculate rates and create all necessary files
+# =============================================================================
 initialize_mrtg() {
-    log "INFO" "Initializing MRTG data collection..."
+    log "INFO" "Initializing MRTG data collection (3-pass warmup)..."
 
     if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would run MRTG 3 times"
+        log "INFO" "Would run MRTG 3 times to seed data"
         return 0
     fi
 
     local mrtg_path=$(command -v mrtg || echo "/usr/bin/mrtg")
     local cfg_file="${MRTG_CONF}/mrtg.cfg"
 
-    # 3-pass warmup
+    # Ensure directories exist
+    mkdir -p "${MRTG_LOG}" "${WEB_MRTG_DIR}"
+
+    # =====================================================================
+    # CRITICAL: 3-pass warmup loop
+    # First run creates .log files (may error)
+    # Second run creates .old files (may error)
+    # Third run calculates rates (should succeed)
+    # =====================================================================
     for i in {1..3}; do
         log "INFO" "Warmup pass ${i}/3..."
-        env LANG=C ${mrtg_path} "${cfg_file}" --logging "${MRTG_LOG}/mrtg.log" >/dev/null 2>&1 || true
+
+        # Run MRTG and ignore errors (they're expected during warmup)
+        if ! env LANG=C ${mrtg_path} "${cfg_file}" --logging "${MRTG_LOG}/mrtg.log" >/dev/null 2>&1; then
+            log "INFO" "Pass ${i} completed (expected warnings ignored)"
+        fi
+
+        # Small delay between runs
         sleep 2
     done
 
-    # Generate index
+    # Generate index page
+    log "INFO" "Generating index page..."
     local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
     ${indexmaker_path} "${cfg_file}" --output="${WEB_MRTG_DIR}/index.html"
 
     # Set permissions
-    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
-    chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
+        if id diradmin >/dev/null 2>&1; then
+            chown -R diradmin:diradmin "${WEB_MRTG_DIR}"
+        fi
+        chmod 755 "${WEB_MRTG_DIR}"
+        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \;
+    else
+        chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
+        chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+    fi
 
-    log "SUCCESS" "Initialization complete"
+    log "SUCCESS" "Initialization complete - MRTG data seeded"
 }
 
 # =============================================================================
@@ -1255,8 +1337,8 @@ verify_system_health() {
     # 3. Cron
     echo -e "\n${BOLD}3. Scheduled Tasks${NC}"
     if crontab -l 2>/dev/null | grep -q "run-mrtg.sh"; then
-        local cron_line=$(crontab -l 2>/dev/null | grep "run-mrtg.sh" | head -1)
-        echo -e "  ${GREEN}✓${NC} Cron job: ${cron_line}"
+        local cron_line=$(crontab -l 2>/dev/null | grep "run-mrtg.sh" | head -1 | awk '{$1=$2=$3=$4=$5=""; print $0}' | xargs)
+        echo -e "  ${GREEN}✓${NC} Cron job active"
     else
         echo -e "  ${RED}✗${NC} No cron job found"
         ((errors++))
@@ -1279,7 +1361,7 @@ verify_system_health() {
             ((warnings++))
         fi
     else
-        echo -e "  ${RED}✗${NC} No log file"
+        echo -e "  ${RED}✗${NC} No log file found"
         ((errors++))
     fi
 
@@ -1290,17 +1372,25 @@ verify_system_health() {
 
         local image_count=$(find "${WEB_MRTG_DIR}" -name "*.png" 2>/dev/null | wc -l)
         if [[ ${image_count} -gt 0 ]]; then
-            echo -e "  ${GREEN}✓${NC} Found ${image_count} graphs"
+            echo -e "  ${GREEN}✓${NC} Found ${image_count} graph images"
         else
-            echo -e "  ${YELLOW}⚠${NC} No graphs yet"
+            echo -e "  ${YELLOW}⚠${NC} No graphs yet (waiting for first data)"
             ((warnings++))
         fi
 
         if [[ -f "${WEB_MRTG_DIR}/index.html" ]]; then
             echo -e "  ${GREEN}✓${NC} Index page exists"
         else
-            echo -e "  ${YELLOW}⚠${NC} Index missing"
+            echo -e "  ${YELLOW}⚠${NC} Index page missing"
             ((warnings++))
+        fi
+
+        # Check permissions
+        if [[ -r "${WEB_MRTG_DIR}" ]]; then
+            echo -e "  ${GREEN}✓${NC} Directory is readable"
+        else
+            echo -e "  ${RED}✗${NC} Directory not readable"
+            ((errors++))
         fi
     else
         echo -e "  ${RED}✗${NC} Web directory missing"
@@ -1310,14 +1400,25 @@ verify_system_health() {
     # 6. Network Interfaces
     echo -e "\n${BOLD}6. Network Interfaces${NC}"
     local interfaces=($(detect_network_interfaces))
-    echo -e "  ${GREEN}✓${NC} Detected ${#interfaces[@]} interfaces"
+    echo -e "  ${GREEN}✓${NC} Detected ${#interfaces[@]} active interfaces"
+    local monitored=0
     for interface in "${interfaces[@]}"; do
         if [[ -f "${WEB_MRTG_DIR}/${interface}.html" ]]; then
-            echo -e "  ${GREEN}  ✓ ${interface}: active"
-        else
-            echo -e "  ${YELLOW}  ○ ${interface}: waiting"
+            monitored=$((monitored + 1))
         fi
     done
+    echo -e "  ${GREEN}✓${NC} Monitoring ${monitored} interfaces"
+
+    # 7. Firewall Status
+    echo -e "\n${BOLD}7. Firewall Configuration${NC}"
+    if [[ -f /etc/csf/csf.conf ]]; then
+        if grep -q "161" /etc/csf/csf.conf; then
+            echo -e "  ${GREEN}✓${NC} CSF allows SNMP (port 161)"
+        else
+            echo -e "  ${YELLOW}⚠${NC} CSF may block SNMP - port 161 not configured"
+            ((warnings++))
+        fi
+    fi
 
     # Summary
     echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
@@ -1330,6 +1431,7 @@ verify_system_health() {
         echo -e "\n${YELLOW}${BOLD}⚠ SYSTEM HEALTH: GOOD WITH WARNINGS${NC}"
     else
         echo -e "\n${RED}${BOLD}✗ SYSTEM HEALTH: ISSUES DETECTED${NC}"
+        echo -e "${RED}Please fix the ${errors} error(s) above${NC}"
     fi
 
     echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}\n"
@@ -1350,23 +1452,35 @@ repair_installation() {
 
     # Restart SNMP
     log "INFO" "Restarting SNMP..."
-    systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
+    if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
+        systemctl restart snmpd
+    else
+        service snmpd restart
+    fi
     sleep 3
 
     # Regenerate config
     generate_mrtg_config
 
-    # Reinitialize
+    # Reinitialize with warmup
     initialize_mrtg
 
-    # Fix cron
+    # Fix cron if missing
     if ! crontab -l 2>/dev/null | grep -q "run-mrtg.sh"; then
         setup_cron
     fi
 
     # Fix permissions
-    chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
-    chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
+        if id diradmin >/dev/null 2>&1; then
+            chown -R diradmin:diradmin "${WEB_MRTG_DIR}"
+        fi
+        chmod 755 "${WEB_MRTG_DIR}"
+        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \;
+    else
+        chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
+        chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+    fi
 
     log "SUCCESS" "Repair completed"
 
@@ -1454,9 +1568,13 @@ restore_config() {
 
         # Restart services
         systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
+        sleep 3
 
         # Re-add cron
         setup_cron
+
+        # Reinitialize
+        initialize_mrtg
 
         log "SUCCESS" "Restore completed"
     fi
