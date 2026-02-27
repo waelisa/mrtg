@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v2.1.6
+# MRTG Professional Monitoring Suite - Enterprise Edition v2.1.7
 # Production-Hardened Network Monitoring for Hosting Environments
 # The definitive MRTG installer for hosting environments
 #
@@ -15,7 +15,7 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v2.1.6
+# Version:     v2.1.7
 # Build Date:  02/27/2026
 # License:     MIT
 #
@@ -47,7 +47,7 @@
 #   --repair, -r      Auto-fix common issues
 #   --backup, -b      Backup configuration
 #   --restore, -R     Restore from backup
-# --update, -U      Self-update from GitHub
+#   --update, -U      Self-update from GitHub
 #   --auto, -a        Unattended installation (uses defaults)
 #   --dry-run         Test without changes
 #   --force           Skip confirmations
@@ -64,7 +64,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v2.1.6"
+readonly SCRIPT_VERSION="v2.1.7"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -785,9 +785,9 @@ install_dependencies() {
     fi
 }
 
-# -----------------------------------------------------------------------------
-# UPDATED configure_snmp function – Debian 12 compatible
-# -----------------------------------------------------------------------------
+# =============================================================================
+# UPDATED configure_snmp function – Debian 12 compatible with IPv4/IPv6 auth
+# =============================================================================
 configure_snmp() {
     log "INFO" "Configuring SNMP..."
 
@@ -819,12 +819,12 @@ configure_snmp() {
 # Community: ${SNMP_COMMUNITY}
 ########################################################################
 
-# Explicitly bind to localhost only (Debian 12 compatibility)
+# Explicitly bind to localhost only (both IPv4 and IPv6)
 agentaddress 127.0.0.1,[::1]
 
-# Read-only access with custom community
+# Read-only access with custom community for both IPv4 and IPv6
 rocommunity ${SNMP_COMMUNITY} 127.0.0.1
-rocommunity6 ${SNMP_COMMUNITY} ::1
+rocommunity ${SNMP_COMMUNITY} ::1
 
 # System information
 syslocation "Production Server"
@@ -884,7 +884,7 @@ EOF
         service snmpd restart || true
     fi
 
-    # CRITICAL: Wait for SNMP to fully initialize
+    # CRITICAL: Wait for SNMP to fully initialize and bind to ports
     log "INFO" "Waiting 5 seconds for SNMP service to stabilize..."
     sleep 5
 
@@ -908,228 +908,9 @@ EOF
     fi
 }
 
-configure_firewall() {
-    log "INFO" "Configuring firewall for SNMP (UDP 161)..."
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would configure firewall for SNMP"
-        return 0
-    fi
-
-    local firewall_configured=false
-
-    # =====================================================================
-    # CSF (ConfigServer Firewall) - Common in DirectAdmin/cPanel
-    # SAFE HANDLING: Avoid double commas and syntax errors
-    # =====================================================================
-    if [[ -f /etc/csf/csf.conf ]]; then
-        log "INFO" "CSF firewall detected - applying safe configuration"
-
-        # Backup CSF config
-        cp /etc/csf/csf.conf "/etc/csf/csf.conf.backup.$(date +%Y%m%d-%H%M%S)" || true
-
-        local csf_modified=false
-
-        # Process UDP_IN and UDP_OUT safely
-        for port_type in "UDP_IN" "UDP_OUT"; do
-            # Check if port 161 is already present
-            if ! grep -q "161" /etc/csf/csf.conf; then
-                # Get current value safely
-                local current_line=$(grep "^${port_type} =" /etc/csf/csf.conf | head -1 || true)
-                local current=$(echo "${current_line}" | cut -d'"' -f2 || true)
-
-                # Case 1: Empty string - just set to "161"
-                if [[ -z "${current}" ]]; then
-                    sed -i "s/^${port_type} = \"\"/${port_type} = \"161\"/" /etc/csf/csf.conf
-                    log "INFO" "Set ${port_type} to \"161\""
-                    csf_modified=true
-
-                # Case 2: Non-empty string - add to beginning with comma
-                else
-                    # Add to beginning to avoid trailing comma issues
-                    sed -i "s/^${port_type} = \"${current}\"/${port_type} = \"161,${current}\"/" /etc/csf/csf.conf
-                    log "INFO" "Added 161 to ${port_type}"
-                    csf_modified=true
-                fi
-            fi
-        done
-
-        # Only restart CSF if changes were made
-        if [[ "${csf_modified}" == true ]]; then
-            csf -r >/dev/null 2>&1 || true
-            log "SUCCESS" "CSF restarted with new rules"
-        else
-            log "INFO" "CSF already allows SNMP"
-        fi
-
-        firewall_configured=true
-    fi
-
-    # =====================================================================
-    # Firewalld (RHEL/CentOS/Alma/Rocky)
-    # =====================================================================
-    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-        log "INFO" "Firewalld detected"
-        if ! firewall-cmd --list-services --permanent | grep -q "snmp"; then
-            firewall-cmd --permanent --add-service=snmp || true
-            firewall-cmd --reload >/dev/null || true
-            log "SUCCESS" "Firewalld configured"
-        else
-            log "INFO" "SNMP already allowed in firewalld"
-        fi
-        firewall_configured=true
-    fi
-
-    # =====================================================================
-    # UFW (Ubuntu/Debian)
-    # =====================================================================
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
-        log "INFO" "UFW detected"
-        if ! ufw status | grep -q "161"; then
-            ufw allow snmp >/dev/null 2>&1 || true
-            log "SUCCESS" "UFW configured"
-        else
-            log "INFO" "SNMP already allowed in UFW"
-        fi
-        firewall_configured=true
-    fi
-
-    # =====================================================================
-    # iptables (fallback)
-    # =====================================================================
-    if [[ "${firewall_configured}" == false ]] && command -v iptables >/dev/null 2>&1; then
-        log "INFO" "Configuring iptables"
-
-        if ! iptables -C INPUT -p udp --dport 161 -j ACCEPT 2>/dev/null; then
-            iptables -A INPUT -p udp --dport 161 -s 127.0.0.1 -j ACCEPT || true
-            iptables -A INPUT -p udp --dport 161 -m state --state NEW -j ACCEPT || true
-            log "SUCCESS" "iptables rules added"
-
-            # Save rules
-            if [[ -f /etc/redhat-release ]]; then
-                service iptables save >/dev/null 2>&1 || true
-            elif [[ -f /etc/debian_version ]]; then
-                iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-            fi
-        fi
-        firewall_configured=true
-    fi
-
-    if [[ "${firewall_configured}" == false ]]; then
-        log "INFO" "No active firewall detected"
-    fi
-}
-
-create_directories() {
-    log "INFO" "Creating directory structure..."
-
-    local dirs=(
-        "${MRTG_BASE}"
-        "${MRTG_CONF}"
-        "${MRTG_LOG}"
-        "${MRTG_HTML}"
-        "${MRTG_BIN}"
-        "${MRTG_SCRIPTS}"
-        "${MRTG_VAR}"
-        "${BACKUP_DIR}"
-        "${WEB_MRTG_DIR}"
-    )
-
-    for dir in "${dirs[@]}"; do
-        if [[ ! -d "${dir}" ]]; then
-            if [[ "${DRY_RUN}" == true ]]; then
-                log "INFO" "Would create: ${dir}"
-            else
-                mkdir -p "${dir}" || error_exit "Failed to create directory: ${dir}"
-                log "DEBUG" "Created: ${dir}"
-            fi
-        fi
-    done
-
-    if [[ "${DRY_RUN}" != true ]]; then
-        chmod 755 "${MRTG_BASE}" 2>/dev/null || true
-        chmod 750 "${MRTG_CONF}" 2>/dev/null || true
-        chmod 755 "${MRTG_LOG}" 2>/dev/null || true
-        chmod 755 "${MRTG_HTML}" 2>/dev/null || true
-        chmod 755 "${MRTG_SCRIPTS}" 2>/dev/null || true
-        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
-    fi
-
-    log "SUCCESS" "Directories created"
-}
-
 # =============================================================================
-# RSPAMD MONITORING SETUP (with timeout protection and robust JSON parsing)
+# UPDATED generate_mrtg_config function – with Debian MIB fix
 # =============================================================================
-setup_rspamd_monitoring() {
-    if [[ "${HAS_RSPAMD}" != true ]] || [[ "${DRY_RUN}" == true ]]; then
-        return 0
-    fi
-
-    log "INFO" "Setting up Rspamd monitoring helpers with timeout protection..."
-
-    # Create the Rspamd stats helper script with robust JSON parsing
-    cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
-#!/bin/bash
-# Rspamd Statistics Collector for MRTG v2.1.6
-# Handles timeouts, permissions, and malformed JSON gracefully
-
-# Query with 2-second timeout to prevent hanging
-STATS=$(timeout 2 rspamc -j stat 2>/dev/null)
-
-if [[ $? -eq 0 ]] && [[ -n "$STATS" ]]; then
-    # Parse JSON with fallback to zeros on any error
-    python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    scanned = data.get('scanned', 0)
-    rejected = data.get('actions', {}).get('reject', 0)
-    print(scanned)
-    print(rejected)
-except:
-    print('0')
-    print('0')
-" <<< "$STATS" 2>/dev/null || echo -e "0\n0"
-else
-    # Check if rspamd socket exists but we can't connect
-    if [[ -S /var/run/rspamd/rspamd.sock ]] || [[ -S /tmp/rspamd.sock ]]; then
-        # Socket exists but connection failed - likely permission issue
-        echo "0"
-        echo "0"
-    else
-        # No socket at all - rspamd probably not running
-        echo "0"
-        echo "0"
-    fi
-fi
-EOF
-
-    chmod 755 "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
-
-    # =====================================================================
-    # CRITICAL: Fix Rspamd socket permissions
-    # =====================================================================
-    if [[ -d /var/run/rspamd ]]; then
-        chmod 755 /var/run/rspamd 2>/dev/null || true
-        chown -R rspamd:rspamd /var/run/rspamd 2>/dev/null || true
-    fi
-
-    # For systemd systems, create drop-in for socket permissions
-    if command -v systemctl >/dev/null 2>&1 && [[ -f /etc/systemd/system/rspamd.service ]]; then
-        mkdir -p /etc/systemd/system/rspamd.service.d 2>/dev/null || true
-        cat > /etc/systemd/system/rspamd.service.d/override.conf << EOF
-[Service]
-SupplementaryGroups=rspamd
-EOF
-        systemctl daemon-reload 2>/dev/null || true
-        systemctl restart rspamd 2>/dev/null || true
-        log "DEBUG" "Created systemd drop-in for rspamd socket permissions"
-    fi
-
-    log "SUCCESS" "Rspamd monitoring helpers installed with timeout protection"
-}
-
 generate_mrtg_config() {
     log "INFO" "Generating MRTG configuration..."
 
@@ -1143,10 +924,18 @@ generate_mrtg_config() {
         return 0
     fi
 
+    # =====================================================================
+    # DEBIAN 12 FIX: Comment out the line that disables MIBs
+    # =====================================================================
+    if [[ -f /etc/snmp/snmp.conf ]]; then
+        log "INFO" "Fixing Debian MIB configuration..."
+        sed -i 's/^mibs :/#mibs :/' /etc/snmp/snmp.conf
+    fi
+
     # Ensure SNMP is ready
     sleep 2
 
-    # Try cfgmaker with retries
+    # Try cfgmaker with retries - explicitly use 127.0.0.1 to avoid IPv6 issues
     local cfg_success=false
     for i in {1..3}; do
         log "INFO" "Attempt ${i} to detect interfaces..."
@@ -1159,6 +948,7 @@ generate_mrtg_config() {
             --global "EnableIPv6: yes" \
             --global "Language: english" \
             --global "IconDir: /mrtg-icons" \
+            --ifref=descr \
             --snmp-options=:::::2 \
             "${SNMP_COMMUNITY}@127.0.0.1" > "${cfg_file}.tmp" 2>/dev/null; then
 
@@ -1445,6 +1235,228 @@ EOF
     done
 }
 
+configure_firewall() {
+    log "INFO" "Configuring firewall for SNMP (UDP 161)..."
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would configure firewall for SNMP"
+        return 0
+    fi
+
+    local firewall_configured=false
+
+    # =====================================================================
+    # CSF (ConfigServer Firewall) - Common in DirectAdmin/cPanel
+    # SAFE HANDLING: Avoid double commas and syntax errors
+    # =====================================================================
+    if [[ -f /etc/csf/csf.conf ]]; then
+        log "INFO" "CSF firewall detected - applying safe configuration"
+
+        # Backup CSF config
+        cp /etc/csf/csf.conf "/etc/csf/csf.conf.backup.$(date +%Y%m%d-%H%M%S)" || true
+
+        local csf_modified=false
+
+        # Process UDP_IN and UDP_OUT safely
+        for port_type in "UDP_IN" "UDP_OUT"; do
+            # Check if port 161 is already present
+            if ! grep -q "161" /etc/csf/csf.conf; then
+                # Get current value safely
+                local current_line=$(grep "^${port_type} =" /etc/csf/csf.conf | head -1 || true)
+                local current=$(echo "${current_line}" | cut -d'"' -f2 || true)
+
+                # Case 1: Empty string - just set to "161"
+                if [[ -z "${current}" ]]; then
+                    sed -i "s/^${port_type} = \"\"/${port_type} = \"161\"/" /etc/csf/csf.conf
+                    log "INFO" "Set ${port_type} to \"161\""
+                    csf_modified=true
+
+                # Case 2: Non-empty string - add to beginning with comma
+                else
+                    # Add to beginning to avoid trailing comma issues
+                    sed -i "s/^${port_type} = \"${current}\"/${port_type} = \"161,${current}\"/" /etc/csf/csf.conf
+                    log "INFO" "Added 161 to ${port_type}"
+                    csf_modified=true
+                fi
+            fi
+        done
+
+        # Only restart CSF if changes were made
+        if [[ "${csf_modified}" == true ]]; then
+            csf -r >/dev/null 2>&1 || true
+            log "SUCCESS" "CSF restarted with new rules"
+        else
+            log "INFO" "CSF already allows SNMP"
+        fi
+
+        firewall_configured=true
+    fi
+
+    # =====================================================================
+    # Firewalld (RHEL/CentOS/Alma/Rocky)
+    # =====================================================================
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        log "INFO" "Firewalld detected"
+        if ! firewall-cmd --list-services --permanent | grep -q "snmp"; then
+            firewall-cmd --permanent --add-service=snmp || true
+            firewall-cmd --reload >/dev/null || true
+            log "SUCCESS" "Firewalld configured"
+        else
+            log "INFO" "SNMP already allowed in firewalld"
+        fi
+        firewall_configured=true
+    fi
+
+    # =====================================================================
+    # UFW (Ubuntu/Debian)
+    # =====================================================================
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
+        log "INFO" "UFW detected"
+        if ! ufw status | grep -q "161"; then
+            ufw allow snmp >/dev/null 2>&1 || true
+            log "SUCCESS" "UFW configured"
+        else
+            log "INFO" "SNMP already allowed in UFW"
+        fi
+        firewall_configured=true
+    fi
+
+    # =====================================================================
+    # iptables (fallback)
+    # =====================================================================
+    if [[ "${firewall_configured}" == false ]] && command -v iptables >/dev/null 2>&1; then
+        log "INFO" "Configuring iptables"
+
+        if ! iptables -C INPUT -p udp --dport 161 -j ACCEPT 2>/dev/null; then
+            iptables -A INPUT -p udp --dport 161 -s 127.0.0.1 -j ACCEPT || true
+            iptables -A INPUT -p udp --dport 161 -m state --state NEW -j ACCEPT || true
+            log "SUCCESS" "iptables rules added"
+
+            # Save rules
+            if [[ -f /etc/redhat-release ]]; then
+                service iptables save >/dev/null 2>&1 || true
+            elif [[ -f /etc/debian_version ]]; then
+                iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+            fi
+        fi
+        firewall_configured=true
+    fi
+
+    if [[ "${firewall_configured}" == false ]]; then
+        log "INFO" "No active firewall detected"
+    fi
+}
+
+create_directories() {
+    log "INFO" "Creating directory structure..."
+
+    local dirs=(
+        "${MRTG_BASE}"
+        "${MRTG_CONF}"
+        "${MRTG_LOG}"
+        "${MRTG_HTML}"
+        "${MRTG_BIN}"
+        "${MRTG_SCRIPTS}"
+        "${MRTG_VAR}"
+        "${BACKUP_DIR}"
+        "${WEB_MRTG_DIR}"
+    )
+
+    for dir in "${dirs[@]}"; do
+        if [[ ! -d "${dir}" ]]; then
+            if [[ "${DRY_RUN}" == true ]]; then
+                log "INFO" "Would create: ${dir}"
+            else
+                mkdir -p "${dir}" || error_exit "Failed to create directory: ${dir}"
+                log "DEBUG" "Created: ${dir}"
+            fi
+        fi
+    done
+
+    if [[ "${DRY_RUN}" != true ]]; then
+        chmod 755 "${MRTG_BASE}" 2>/dev/null || true
+        chmod 750 "${MRTG_CONF}" 2>/dev/null || true
+        chmod 755 "${MRTG_LOG}" 2>/dev/null || true
+        chmod 755 "${MRTG_HTML}" 2>/dev/null || true
+        chmod 755 "${MRTG_SCRIPTS}" 2>/dev/null || true
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+    fi
+
+    log "SUCCESS" "Directories created"
+}
+
+# =============================================================================
+# RSPAMD MONITORING SETUP (with timeout protection and robust JSON parsing)
+# =============================================================================
+setup_rspamd_monitoring() {
+    if [[ "${HAS_RSPAMD}" != true ]] || [[ "${DRY_RUN}" == true ]]; then
+        return 0
+    fi
+
+    log "INFO" "Setting up Rspamd monitoring helpers with timeout protection..."
+
+    # Create the Rspamd stats helper script with robust JSON parsing
+    cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
+#!/bin/bash
+# Rspamd Statistics Collector for MRTG v2.1.7
+# Handles timeouts, permissions, and malformed JSON gracefully
+
+# Query with 2-second timeout to prevent hanging
+STATS=$(timeout 2 rspamc -j stat 2>/dev/null)
+
+if [[ $? -eq 0 ]] && [[ -n "$STATS" ]]; then
+    # Parse JSON with fallback to zeros on any error
+    python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    scanned = data.get('scanned', 0)
+    rejected = data.get('actions', {}).get('reject', 0)
+    print(scanned)
+    print(rejected)
+except:
+    print('0')
+    print('0')
+" <<< "$STATS" 2>/dev/null || echo -e "0\n0"
+else
+    # Check if rspamd socket exists but we can't connect
+    if [[ -S /var/run/rspamd/rspamd.sock ]] || [[ -S /tmp/rspamd.sock ]]; then
+        # Socket exists but connection failed - likely permission issue
+        echo "0"
+        echo "0"
+    else
+        # No socket at all - rspamd probably not running
+        echo "0"
+        echo "0"
+    fi
+fi
+EOF
+
+    chmod 755 "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
+
+    # =====================================================================
+    # CRITICAL: Fix Rspamd socket permissions
+    # =====================================================================
+    if [[ -d /var/run/rspamd ]]; then
+        chmod 755 /var/run/rspamd 2>/dev/null || true
+        chown -R rspamd:rspamd /var/run/rspamd 2>/dev/null || true
+    fi
+
+    # For systemd systems, create drop-in for socket permissions
+    if command -v systemctl >/dev/null 2>&1 && [[ -f /etc/systemd/system/rspamd.service ]]; then
+        mkdir -p /etc/systemd/system/rspamd.service.d 2>/dev/null || true
+        cat > /etc/systemd/system/rspamd.service.d/override.conf << EOF
+[Service]
+SupplementaryGroups=rspamd
+EOF
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl restart rspamd 2>/dev/null || true
+        log "DEBUG" "Created systemd drop-in for rspamd socket permissions"
+    fi
+
+    log "SUCCESS" "Rspamd monitoring helpers installed with timeout protection"
+}
+
 # =============================================================================
 # CRITICAL: LOGROTATE CONFIGURATION
 # =============================================================================
@@ -1491,7 +1503,7 @@ setup_cron() {
     # All runner-specific variables are escaped with backslash
     cat > "${MRTG_BIN}/run-mrtg.sh" << EOF
 #!/bin/bash
-# MRTG Runner - Generated by MRTG Professional Suite v2.1.6
+# MRTG Runner - Generated by MRTG Professional Suite v2.1.7
 # Includes lockfile to prevent race conditions on high-traffic servers
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
