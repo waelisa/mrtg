@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v2.1.9
+# MRTG Professional Monitoring Suite - Enterprise Edition v2.1.10
 # Production-Hardened Network Monitoring for Hosting Environments
 # The definitive MRTG installer for hosting environments
 #
@@ -15,7 +15,7 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v2.1.9
+# Version:     v2.1.10
 # Build Date:  02/27/2026
 # License:     MIT
 #
@@ -64,7 +64,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v2.1.9"
+readonly SCRIPT_VERSION="v2.1.10"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -1348,7 +1348,7 @@ configure_firewall() {
 }
 
 # =============================================================================
-# FIXED create_directories function – handles chown errors gracefully
+# FIXED create_directories function – handles chown errors gracefully with || true
 # =============================================================================
 create_directories() {
     log "INFO" "Creating directory structure..."
@@ -1383,21 +1383,22 @@ create_directories() {
     if [[ "${DRY_RUN}" != true ]]; then
         log "INFO" "Setting directory permissions..."
 
-        # Set base permissions (non-critical)
-        chmod 755 "${MRTG_BASE}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_BASE}"
-        chmod 750 "${MRTG_CONF}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_CONF}"
-        chmod 755 "${MRTG_LOG}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_LOG}"
-        chmod 755 "${MRTG_HTML}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_HTML}"
-        chmod 755 "${MRTG_SCRIPTS}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_SCRIPTS}"
-        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on ${WEB_MRTG_DIR}"
+        # Set base permissions (non-critical) - all with || true to prevent script exit
+        chmod 755 "${MRTG_BASE}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_BASE}" || true
+        chmod 750 "${MRTG_CONF}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_CONF}" || true
+        chmod 755 "${MRTG_LOG}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_LOG}" || true
+        chmod 755 "${MRTG_HTML}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_HTML}" || true
+        chmod 755 "${MRTG_SCRIPTS}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_SCRIPTS}" || true
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on ${WEB_MRTG_DIR}" || true
 
         # =====================================================================
-        # CRITICAL FIX: Robust ownership assignment (line 1377 fix)
+        # CRITICAL FIX: Robust ownership assignment with || true at the end
+        # This prevents the error trap from triggering on chown failures
         # =====================================================================
         if id "${WEB_USER}" >/dev/null 2>&1; then
             log "INFO" "Attempting to set ownership to ${WEB_USER}..."
 
-            # Try to set ownership on MRTG base directory
+            # Try to set ownership on MRTG base directory - with || true at the end
             if chown -R "${WEB_USER}:${WEB_GROUP}" "${MRTG_BASE}" 2>/dev/null; then
                 log "SUCCESS" "Ownership set to ${WEB_USER}:${WEB_GROUP} for ${MRTG_BASE}"
             else
@@ -1408,8 +1409,10 @@ create_directories() {
                     log "WARNING" "Could not set ownership on ${MRTG_BASE} - continuing with root ownership"
                 fi
             fi
+            # Ensure we always continue regardless of chown results
+            true
 
-            # Try to set ownership on web directory
+            # Try to set ownership on web directory - with || true at the end
             if [[ -d "${WEB_MRTG_DIR}" ]]; then
                 if chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null; then
                     log "SUCCESS" "Ownership set to ${WEB_USER}:${WEB_GROUP} for web directory"
@@ -1421,6 +1424,8 @@ create_directories() {
                         log "WARNING" "Could not set ownership on web directory - continuing with current permissions"
                     fi
                 fi
+                # Ensure we always continue regardless of chown results
+                true
             fi
         else
             log "WARNING" "User ${WEB_USER} not found, directories will remain with current ownership"
@@ -1444,7 +1449,7 @@ setup_rspamd_monitoring() {
     # Create the Rspamd stats helper script with robust JSON parsing
     cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
 #!/bin/bash
-# Rspamd Statistics Collector for MRTG v2.1.9
+# Rspamd Statistics Collector for MRTG v2.1.10
 # Handles timeouts, permissions, and malformed JSON gracefully
 
 # Query with 2-second timeout to prevent hanging
@@ -1549,7 +1554,7 @@ setup_cron() {
     # All runner-specific variables are escaped with backslash
     cat > "${MRTG_BIN}/run-mrtg.sh" << EOF
 #!/bin/bash
-# MRTG Runner - Generated by MRTG Professional Suite v2.1.9
+# MRTG Runner - Generated by MRTG Professional Suite v2.1.10
 # Includes lockfile to prevent race conditions on high-traffic servers
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
