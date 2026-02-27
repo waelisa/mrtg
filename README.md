@@ -7,6 +7,7 @@
 The definitive, zero-assumption MRTG installer for production hosting environments.
 
 Most MRTG installers assume a "vanilla" OS. This suite is different. It was built specifically for DirectAdmin, cPanel, and Plesk environments where web servers, firewalls, and service paths are often customized.
+
 🚀 Key Features
 
     🛡️ Production Hardened: Includes a lock-file system to prevent race conditions and data corruption.
@@ -24,6 +25,7 @@ Most MRTG installers assume a "vanilla" OS. This suite is different. It was buil
     🔌 Hosting Panel Ready: Native plugin support for DirectAdmin "Admin Level" visibility.
 
 🛠️ Installation
+
 Quick Start (Interactive)
 
 Run the following command as root to start the guided installation wizard:
