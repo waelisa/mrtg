@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v2.1.2
+# MRTG Professional Monitoring Suite - Enterprise Edition v2.1.3
 # Production-Hardened Network Monitoring for Hosting Environments
 # The definitive MRTG installer for hosting environments
 #
@@ -15,7 +15,7 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v2.1.2
+# Version:     v2.1.3
 # Build Date:  02/27/2026
 # License:     MIT
 #
@@ -57,13 +57,14 @@
 # =============================================================================
 
 set -euo pipefail
+set -E
 IFS=$'\n\t'
 
 # =============================================================================
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v2.1.2"
+readonly SCRIPT_VERSION="v2.1.3"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -117,8 +118,22 @@ readonly NC='\033[0m'
 readonly BOLD='\033[1m'
 
 # =============================================================================
-# UTILITY FUNCTIONS
+# ERROR HANDLING
 # =============================================================================
+
+# Trap any error to print line number and exit
+trap 'error_handler $? $LINENO' ERR
+
+error_handler() {
+    local exit_code=$1
+    local line_no=$2
+    log "ERROR" "Script failed at line ${line_no} with exit code ${exit_code}"
+    exit ${exit_code}
+}
+
+# =============================================================================
+# UTILITY FUNCTIONS
+#============================================================================
 
 log() {
     local level="$1"
@@ -168,8 +183,8 @@ confirm_action() {
 
 acquire_lock() {
     if [[ -f "${LOCK_FILE}" ]]; then
-        local pid=$(cat "${LOCK_FILE}")
-        if kill -0 "${pid}" 2>/dev/null; then
+        local pid=$(cat "${LOCK_FILE}" 2>/dev/null || true)
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
             error_exit "Another instance of ${SCRIPT_NAME} is running (PID: ${pid})"
         else
             log "WARNING" "Removing stale lock file"
@@ -289,7 +304,7 @@ detect_control_panel() {
     # cPanel
     elif [[ -d /usr/local/cpanel ]]; then
         PANEL_TYPE="cpanel"
-        if command -v /usr/local/cpanel/cpanel >/dev/null; then
+        if command -v /usr/local/cpanel/cpanel >/dev/null 2>&1; then
             PANEL_VERSION=$(/usr/local/cpanel/cpanel -V 2>/dev/null | head -1 | tr -d ' ' || echo "unknown")
         fi
         log "SUCCESS" "cPanel detected (v${PANEL_VERSION})"
@@ -297,7 +312,7 @@ detect_control_panel() {
     # Plesk
     elif [[ -d /usr/local/psa ]]; then
         PANEL_TYPE="plesk"
-        if command -v plesk >/dev/null; then
+        if command -v plesk >/dev/null 2>&1; then
             PANEL_VERSION=$(plesk version 2>/dev/null | grep -i "version" | head -1 | awk '{print $2}' || echo "unknown")
         fi
         log "SUCCESS" "Plesk detected (v${PANEL_VERSION})"
@@ -327,7 +342,7 @@ detect_web_server() {
     # Check for running processes
     if pgrep -x "nginx" >/dev/null 2>&1; then
         WEB_SERVER="nginx"
-        WEB_USER=$(ps aux | grep nginx | grep -v grep | head -1 | awk '{print $1}')
+        WEB_USER=$(ps aux | grep nginx | grep -v grep | head -1 | awk '{print $1}' || true)
         WEB_GROUP=$(id -gn "${WEB_USER}" 2>/dev/null || echo "${WEB_USER}")
         web_servers_found+=("nginx (active)")
     fi
@@ -360,7 +375,7 @@ detect_web_server() {
 
     if pgrep -x "caddy" >/dev/null 2>&1; then
         WEB_SERVER="caddy"
-        WEB_USER=$(ps aux | grep caddy | grep -v grep | head -1 | awk '{print $1}')
+        WEB_USER=$(ps aux | grep caddy | grep -v grep | head -1 | awk '{print $1}' || true)
         WEB_GROUP=$(id -gn "${WEB_USER}" 2>/dev/null || echo "${WEB_USER}")
         web_servers_found+=("caddy (active)")
     fi
@@ -499,7 +514,7 @@ detect_rspamd() {
             # =================================================================
             # CRITICAL: Ensure web user can access Rspamd socket
             # =================================================================
-            if getent group rspamd >/dev/null; then
+            if getent group rspamd >/dev/null 2>&1; then
                 usermod -aG rspamd "${WEB_USER}" >/dev/null 2>&1 || true
                 # Also add common service users
                 for user in snmp snmpd www-data apache nginx nobody; do
@@ -524,7 +539,7 @@ detect_mysql_socket() {
 
     # Method 1: Try mysql_config
     if command -v mysql_config >/dev/null 2>&1; then
-        MYSQL_SOCKET=$(mysql_config --socket 2>/dev/null)
+        MYSQL_SOCKET=$(mysql_config --socket 2>/dev/null || true)
         if [[ -n "${MYSQL_SOCKET}" ]] && [[ -S "${MYSQL_SOCKET}" ]]; then
             log "DEBUG" "Found MySQL socket via mysql_config: ${MYSQL_SOCKET}"
             return 0
@@ -552,10 +567,10 @@ detect_mysql_socket() {
 
     # Method 3: Try to extract from running process
     if pgrep mysqld >/dev/null 2>&1; then
-        local pid=$(pgrep mysqld | head -1)
+        local pid=$(pgrep mysqld | head -1 || true)
         if [[ -n "${pid}" ]]; then
             # Try to get socket from /proc
-            MYSQL_SOCKET=$(ls -l /proc/${pid}/fd 2>/dev/null | grep socket | grep -o '/[^ ]*\.sock' | head -1)
+            MYSQL_SOCKET=$(ls -l /proc/${pid}/fd 2>/dev/null | grep socket | grep -o '/[^ ]*\.sock' | head -1 || true)
             if [[ -n "${MYSQL_SOCKET}" ]] && [[ -S "${MYSQL_SOCKET}" ]]; then
                 log "DEBUG" "Found MySQL socket from process: ${MYSQL_SOCKET}"
                 return 0
@@ -565,7 +580,7 @@ detect_mysql_socket() {
 
     # Method 4: Try MySQL client with connection
     if command -v mysql >/dev/null 2>&1; then
-        local test_socket=$(mysql -e "SHOW VARIABLES LIKE 'socket'" 2>/dev/null | grep socket | awk '{print $2}')
+        local test_socket=$(mysql -e "SHOW VARIABLES LIKE 'socket'" 2>/dev/null | grep socket | awk '{print $2}' || true)
         if [[ -n "${test_socket}" ]] && [[ -S "${test_socket}" ]]; then
             MYSQL_SOCKET="${test_socket}"
             log "DEBUG" "Found MySQL socket from query: ${MYSQL_SOCKET}"
@@ -589,7 +604,7 @@ detect_mysql() {
 
             HAS_MYSQL=true
             log "SUCCESS" "MySQL/MariaDB detected"
-            detect_mysql_socket
+            detect_mysql_socket || true  # ignore return, we just want to set socket
         fi
     fi
 }
@@ -639,13 +654,22 @@ detect_network_interfaces() {
     local interfaces=()
 
     # Get all active network interfaces
-    while IFS= read -r interface; do
-        # Skip virtual interfaces
-        if [[ ! "${interface}" =~ ^(lo|virbr|docker|veth|br-|tun|vnet) ]] && \
-           ip link show "${interface}" 2>/dev/null | grep -q "UP"; then
-            interfaces+=("${interface}")
-        fi
-    done < <(ls /sys/class/net/ 2>/dev/null || ip link show | awk -F': ' '/^[0-9]+: / {print $2}' | cut -d@ -f1)
+    if ls /sys/class/net/ >/dev/null 2>&1; then
+        while IFS= read -r interface; do
+            # Skip virtual interfaces
+            if [[ ! "${interface}" =~ ^(lo|virbr|docker|veth|br-|tun|vnet) ]] && \
+               ip link show "${interface}" 2>/dev/null | grep -q "UP"; then
+                interfaces+=("${interface}")
+            fi
+        done < <(ls /sys/class/net/ 2>/dev/null || true)
+    else
+        while IFS= read -r line; do
+            interface=$(echo "$line" | awk -F': ' '/^[0-9]+: / {print $2}' | cut -d@ -f1)
+            if [[ -n "${interface}" && ! "${interface}" =~ ^(lo|virbr|docker|veth|br-|tun|vnet) ]]; then
+                interfaces+=("${interface}")
+            fi
+        done < <(ip link show 2>/dev/null || true)
+    fi
 
     # Fallback
     if [[ ${#interfaces[@]} -eq 0 ]]; then
@@ -653,7 +677,7 @@ detect_network_interfaces() {
             if [[ "${interface}" != "lo" ]]; then
                 interfaces+=("${interface}")
             fi
-        done < <(ls /sys/class/net/ 2>/dev/null)
+        done < <(ls /sys/class/net/ 2>/dev/null || true)
     fi
 
     printf '%s\n' "${interfaces[@]}"
@@ -664,7 +688,7 @@ detect_ip_address() {
 
     # Try multiple methods
     if command -v ip >/dev/null 2>&1; then
-        ip=$(ip route get 1 2>/dev/null | awk '{print $NF;exit}')
+        ip=$(ip route get 1 2>/dev/null | awk '{print $NF;exit}' || true)
     fi
 
     if [[ -z "${ip}" ]] && command -v curl >/dev/null 2>&1; then
@@ -710,12 +734,12 @@ install_dependencies() {
                 python3-json \
                 curl \
                 wget \
-                --no-install-recommends
+                --no-install-recommends || error_exit "Failed to install packages"
             ;;
         centos|rhel|almalinux|rocky|fedora)
             # Enable EPEL if needed
             if [[ "${OS_ID}" != "fedora" ]] && ! rpm -q epel-release >/dev/null 2>&1; then
-                yum install -y -q epel-release
+                yum install -y -q epel-release || true
             fi
             yum install -y -q \
                 mrtg \
@@ -732,14 +756,14 @@ install_dependencies() {
                 python3 \
                 python3-json \
                 curl \
-                wget
+                wget || error_exit "Failed to install packages"
             ;;
         *)
             log "WARNING" "Unknown OS, attempting generic installation"
             if command -v yum >/dev/null; then
-                yum install -y mrtg net-snmp net-snmp-utils python3 curl wget
+                yum install -y mrtg net-snmp net-snmp-utils python3 curl wget || error_exit "Failed to install packages"
             elif command -v apt-get >/dev/null; then
-                apt-get update && apt-get install -y mrtg snmpd snmp python3 curl wget
+                apt-get update && apt-get install -y mrtg snmpd snmp python3 curl wget || error_exit "Failed to install packages"
             else
                 error_exit "Cannot install packages - unsupported package manager"
             fi
@@ -781,7 +805,7 @@ configure_snmp() {
 
     # Backup existing config
     if [[ -f /etc/snmp/snmpd.conf ]]; then
-        cp /etc/snmp/snmpd.conf "/etc/snmp/snmpd.conf.backup.$(date +%Y%m%d-%H%M%S)"
+        cp /etc/snmp/snmpd.conf "/etc/snmp/snmpd.conf.backup.$(date +%Y%m%d-%H%M%S)" || true
     fi
 
     # Create base SNMP configuration
@@ -843,9 +867,9 @@ EOF
     if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
         systemctl unmask snmpd >/dev/null 2>&1 || true
         systemctl enable snmpd >/dev/null 2>&1 || true
-        systemctl restart snmpd
+        systemctl restart snmpd || true
     else
-        service snmpd restart
+        service snmpd restart || true
     fi
 
     # CRITICAL: Wait for SNMP to fully initialize
@@ -890,7 +914,7 @@ configure_firewall() {
         log "INFO" "CSF firewall detected - applying safe configuration"
 
         # Backup CSF config
-        cp /etc/csf/csf.conf "/etc/csf/csf.conf.backup.$(date +%Y%m%d-%H%M%S)"
+        cp /etc/csf/csf.conf "/etc/csf/csf.conf.backup.$(date +%Y%m%d-%H%M%S)" || true
 
         local csf_modified=false
 
@@ -899,8 +923,8 @@ configure_firewall() {
             # Check if port 161 is already present
             if ! grep -q "161" /etc/csf/csf.conf; then
                 # Get current value safely
-                local current_line=$(grep "^${port_type} =" /etc/csf/csf.conf | head -1)
-                local current=$(echo "${current_line}" | cut -d'"' -f2)
+                local current_line=$(grep "^${port_type} =" /etc/csf/csf.conf | head -1 || true)
+                local current=$(echo "${current_line}" | cut -d'"' -f2 || true)
 
                 # Case 1: Empty string - just set to "161"
                 if [[ -z "${current}" ]]; then
@@ -920,7 +944,7 @@ configure_firewall() {
 
         # Only restart CSF if changes were made
         if [[ "${csf_modified}" == true ]]; then
-            csf -r >/dev/null 2>&1
+            csf -r >/dev/null 2>&1 || true
             log "SUCCESS" "CSF restarted with new rules"
         else
             log "INFO" "CSF already allows SNMP"
@@ -935,8 +959,8 @@ configure_firewall() {
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
         log "INFO" "Firewalld detected"
         if ! firewall-cmd --list-services --permanent | grep -q "snmp"; then
-            firewall-cmd --permanent --add-service=snmp
-            firewall-cmd --reload >/dev/null
+            firewall-cmd --permanent --add-service=snmp || true
+            firewall-cmd --reload >/dev/null || true
             log "SUCCESS" "Firewalld configured"
         else
             log "INFO" "SNMP already allowed in firewalld"
@@ -950,7 +974,7 @@ configure_firewall() {
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
         log "INFO" "UFW detected"
         if ! ufw status | grep -q "161"; then
-            ufw allow snmp >/dev/null 2>&1
+            ufw allow snmp >/dev/null 2>&1 || true
             log "SUCCESS" "UFW configured"
         else
             log "INFO" "SNMP already allowed in UFW"
@@ -965,8 +989,8 @@ configure_firewall() {
         log "INFO" "Configuring iptables"
 
         if ! iptables -C INPUT -p udp --dport 161 -j ACCEPT 2>/dev/null; then
-            iptables -A INPUT -p udp --dport 161 -s 127.0.0.1 -j ACCEPT
-            iptables -A INPUT -p udp --dport 161 -m state --state NEW -j ACCEPT
+            iptables -A INPUT -p udp --dport 161 -s 127.0.0.1 -j ACCEPT || true
+            iptables -A INPUT -p udp --dport 161 -m state --state NEW -j ACCEPT || true
             log "SUCCESS" "iptables rules added"
 
             # Save rules
@@ -1011,12 +1035,12 @@ create_directories() {
     done
 
     if [[ "${DRY_RUN}" != true ]]; then
-        chmod 755 "${MRTG_BASE}"
-        chmod 750 "${MRTG_CONF}"
-        chmod 755 "${MRTG_LOG}"
-        chmod 755 "${MRTG_HTML}"
-        chmod 755 "${MRTG_SCRIPTS}"
-        chmod 755 "${WEB_MRTG_DIR}"
+        chmod 755 "${MRTG_BASE}" 2>/dev/null || true
+        chmod 750 "${MRTG_CONF}" 2>/dev/null || true
+        chmod 755 "${MRTG_LOG}" 2>/dev/null || true
+        chmod 755 "${MRTG_HTML}" 2>/dev/null || true
+        chmod 755 "${MRTG_SCRIPTS}" 2>/dev/null || true
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
     fi
 
     log "SUCCESS" "Directories created"
@@ -1035,7 +1059,7 @@ setup_rspamd_monitoring() {
     # Create the Rspamd stats helper script with robust JSON parsing
     cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
 #!/bin/bash
-# Rspamd Statistics Collector for MRTG v2.1.2
+# Rspamd Statistics Collector for MRTG v2.1.3
 # Handles timeouts, permissions, and malformed JSON gracefully
 
 # Query with 2-second timeout to prevent hanging
@@ -1075,13 +1099,13 @@ EOF
     # CRITICAL: Fix Rspamd socket permissions
     # =====================================================================
     if [[ -d /var/run/rspamd ]]; then
-        chmod 755 /var/run/rspamd
+        chmod 755 /var/run/rspamd 2>/dev/null || true
         chown -R rspamd:rspamd /var/run/rspamd 2>/dev/null || true
     fi
 
     # For systemd systems, create drop-in for socket permissions
     if command -v systemctl >/dev/null 2>&1 && [[ -f /etc/systemd/system/rspamd.service ]]; then
-        mkdir -p /etc/systemd/system/rspamd.service.d
+        mkdir -p /etc/systemd/system/rspamd.service.d 2>/dev/null || true
         cat > /etc/systemd/system/rspamd.service.d/override.conf << EOF
 [Service]
 SupplementaryGroups=rspamd
@@ -1441,7 +1465,6 @@ EOF
 
 # =============================================================================
 # CRITICAL: CRON SETUP WITH LOCKFILE TO PREVENT RACE CONDITIONS
-# FIXED: Using unquoted EOF with proper escaping for runner variables
 # =============================================================================
 setup_cron() {
     log "INFO" "Setting up cron with lockfile protection (interval: ${INTERVAL} minutes)..."
@@ -1456,7 +1479,7 @@ setup_cron() {
     # All runner-specific variables are escaped with backslash
     cat > "${MRTG_BIN}/run-mrtg.sh" << EOF
 #!/bin/bash
-# MRTG Runner - Generated by MRTG Professional Suite v2.1.2
+# MRTG Runner - Generated by MRTG Professional Suite v2.1.3
 # Includes lockfile to prevent race conditions on high-traffic servers
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -1487,8 +1510,8 @@ is_process_running() {
 
 # Check if another instance is running
 if [[ -f "\${LOCKFILE}" ]]; then
-    pid=\$(cat "\${LOCKFILE}")
-    if is_process_running "\${pid}"; then
+    pid=\$(cat "\${LOCKFILE}" 2>/dev/null || true)
+    if [[ -n "\${pid}" ]] && is_process_running "\${pid}"; then
         log_message "Previous MRTG instance still running (PID: \${pid}). Exiting to prevent data corruption."
         exit 1
     else
@@ -1533,11 +1556,11 @@ EOF
     chmod +x "${MRTG_BIN}/run-mrtg.sh"
 
     # Remove old cron entries
-    crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab -
+    crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab - || true
 
     # Add new cron
-    (crontab -l 2>/dev/null || true; echo "# MRTG Monitoring - Added by MRTG Professional Suite v${SCRIPT_VERSION}") | crontab -
-    (crontab -l 2>/dev/null; echo "*/${INTERVAL} * * * * ${MRTG_BIN}/run-mrtg.sh >/dev/null 2>&1") | crontab -
+    (crontab -l 2>/dev/null || true; echo "# MRTG Monitoring - Added by MRTG Professional Suite v${SCRIPT_VERSION}") | crontab - || true
+    (crontab -l 2>/dev/null; echo "*/${INTERVAL} * * * * ${MRTG_BIN}/run-mrtg.sh >/dev/null 2>&1") | crontab - || true
 
     log "SUCCESS" "Cron installed with lockfile protection and low CPU priority"
 }
@@ -1552,7 +1575,7 @@ setup_web_access() {
 
     # Create symbolic link
     if [[ "${WEB_MRTG_DIR}" != "${MRTG_HTML}" ]]; then
-        ln -sfn "${WEB_MRTG_DIR}" "${MRTG_HTML}"
+        ln -sfn "${WEB_MRTG_DIR}" "${MRTG_HTML}" 2>/dev/null || true
     fi
 
     # Create .htaccess for Apache/LiteSpeed
@@ -1621,14 +1644,14 @@ EOF
 
         # Ensure diradmin owns everything
         if id diradmin >/dev/null 2>&1; then
-            chown -R diradmin:diradmin "${WEB_MRTG_DIR}"
+            chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
         fi
 
         # Set 755 on directory so web server can read
-        chmod 755 "${WEB_MRTG_DIR}"
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
 
         # Set 644 on files
-        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \;
+        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
 
         log "SUCCESS" "DirectAdmin permissions set"
     else
@@ -1655,10 +1678,7 @@ configure_panel_integration() {
             local da_plugins="/usr/local/directadmin/plugins"
             local mrtg_plugin="${da_plugins}/mrtg"
 
-            mkdir -p "${mrtg_plugin}/admin"
-            mkdir -p "${mrtg_plugin}/data"
-            mkdir -p "${mrtg_plugin}/hooks"
-            mkdir -p "${mrtg_plugin}/images"
+            mkdir -p "${mrtg_plugin}/admin" "${mrtg_plugin}/data" "${mrtg_plugin}/hooks" "${mrtg_plugin}/images" 2>/dev/null || true
 
             # =================================================================
             # CRITICAL: DirectAdmin plugin.conf with all required flags
@@ -1753,9 +1773,9 @@ EOF
 
             # Set proper ownership for DirectAdmin
             if id diradmin >/dev/null 2>&1; then
-                chown -R diradmin:diradmin "${mrtg_plugin}"
-                chmod 755 "${mrtg_plugin}"
-                chmod 644 "${mrtg_plugin}/plugin.conf"
+                chown -R diradmin:diradmin "${mrtg_plugin}" 2>/dev/null || true
+                chmod 755 "${mrtg_plugin}" 2>/dev/null || true
+                chmod 644 "${mrtg_plugin}/plugin.conf" 2>/dev/null || true
             fi
 
             log "SUCCESS" "DirectAdmin plugin installed with native structure"
@@ -1763,14 +1783,14 @@ EOF
 
         "cpanel")
             if [[ -d "/usr/local/apache/htdocs" ]]; then
-                ln -sfn "${WEB_MRTG_DIR}" "/usr/local/apache/htdocs/mrtg"
+                ln -sfn "${WEB_MRTG_DIR}" "/usr/local/apache/htdocs/mrtg" 2>/dev/null || true
                 log "SUCCESS" "cPanel integration configured"
             fi
             ;;
 
         "plesk")
             if [[ -d "/var/www/vhosts/default/htdocs" ]]; then
-                ln -sfn "${WEB_MRTG_DIR}" "/var/www/vhosts/default/htdocs/mrtg"
+                ln -sfn "${WEB_MRTG_DIR}" "/var/www/vhosts/default/htdocs/mrtg" 2>/dev/null || true
                 log "SUCCESS" "Plesk integration configured"
             fi
             ;;
@@ -1815,7 +1835,7 @@ initialize_mrtg() {
     # Generate index page
     log "INFO" "Generating index page..."
     local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
-    ${indexmaker_path} "${cfg_file}" --output="${WEB_MRTG_DIR}/index.html"
+    ${indexmaker_path} "${cfg_file}" --output="${WEB_MRTG_DIR}/index.html" 2>/dev/null || true
 
     # =====================================================================
     # CRITICAL: Verify index page was generated correctly
@@ -1829,10 +1849,10 @@ initialize_mrtg() {
     # Set permissions
     if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
         if id diradmin >/dev/null 2>&1; then
-            chown -R diradmin:diradmin "${WEB_MRTG_DIR}"
+            chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
         fi
-        chmod 755 "${WEB_MRTG_DIR}"
-        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \;
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
     else
         chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
         chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
@@ -1898,7 +1918,7 @@ verify_system_health() {
 
         # Check if lockfile mechanism is working
         if [[ -f "/tmp/mrtg_cron.lock" ]]; then
-            local lock_pid=$(cat "/tmp/mrtg_cron.lock" 2>/dev/null)
+            local lock_pid=$(cat "/tmp/mrtg_cron.lock" 2>/dev/null || true)
             if [[ -n "${lock_pid}" ]] && kill -0 "${lock_pid}" 2>/dev/null; then
                 echo -e "  ${GREEN}✓${NC} Lockfile active (PID: ${lock_pid})"
             fi
@@ -1920,8 +1940,8 @@ verify_system_health() {
     # 5. Data Collection
     echo -e "\n${BOLD}5. Data Collection${NC}"
     if [[ -f "${MRTG_LOG}/mrtg.log" ]]; then
-        local log_size=$(stat -c%s "${MRTG_LOG}/mrtg.log" 2>/dev/null || stat -f%z "${MRTG_LOG}/mrtg.log" 2>/dev/null)
-        local last_mod=$(stat -c%Y "${MRTG_LOG}/mrtg.log" 2>/dev/null || stat -f%m "${MRTG_LOG}/mrtg.log" 2>/dev/null)
+        local log_size=$(stat -c%s "${MRTG_LOG}/mrtg.log" 2>/dev/null || stat -f%z "${MRTG_LOG}/mrtg.log" 2>/dev/null || echo "0")
+        local last_mod=$(stat -c%Y "${MRTG_LOG}/mrtg.log" 2>/dev/null || stat -f%m "${MRTG_LOG}/mrtg.log" 2>/dev/null || echo "$(date +%s)")
         local current_time=$(date +%s)
         local minutes_ago=$(( (current_time - last_mod) / 60 ))
 
@@ -1948,7 +1968,7 @@ verify_system_health() {
     if [[ -d "${WEB_MRTG_DIR}" ]]; then
         echo -e "  ${GREEN}✓${NC} Web directory exists"
 
-        local image_count=$(find "${WEB_MRTG_DIR}" -name "*.png" 2>/dev/null | wc -l)
+        local image_count=$(find "${WEB_MRTG_DIR}" -name "*.png" 2>/dev/null | wc -l || echo "0")
         if [[ ${image_count} -gt 0 ]]; then
             echo -e "  ${GREEN}✓${NC} Found ${image_count} graph images"
         else
@@ -2008,7 +2028,7 @@ verify_system_health() {
                     echo -e "  ${GREEN}✓${NC} Rspamd stats collecting (timeout-protected)"
 
                     # Check if user is in rspamd group
-                    if id "${WEB_USER}" | grep -q rspamd; then
+                    if id "${WEB_USER}" 2>/dev/null | grep -q rspamd; then
                         echo -e "  ${GREEN}✓${NC} ${WEB_USER} has rspamd group access"
                     fi
                 else
@@ -2104,9 +2124,9 @@ repair_installation() {
     # Restart SNMP
     log "INFO" "Restarting SNMP..."
     if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
-        systemctl restart snmpd
+        systemctl restart snmpd || true
     else
-        service snmpd restart
+        service snmpd restart || true
     fi
     sleep 5
 
@@ -2134,10 +2154,10 @@ repair_installation() {
     # Fix permissions
     if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
         if id diradmin >/dev/null 2>&1; then
-            chown -R diradmin:diradmin "${WEB_MRTG_DIR}"
+            chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
         fi
-        chmod 755 "${WEB_MRTG_DIR}"
-        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \;
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
     else
         chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
         chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
@@ -2162,7 +2182,7 @@ backup_config() {
         return 0
     fi
 
-    mkdir -p "${BACKUP_DIR}"
+    mkdir -p "${BACKUP_DIR}" 2>/dev/null || true
 
     # Backup configuration
     tar -czf "${backup_file}" \
@@ -2228,10 +2248,10 @@ restore_config() {
         backup_config
 
         # Stop cron
-        crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | crontab -
+        crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | crontab - || true
 
         # Restore
-        tar -xzf "${selected}" -C /
+        tar -xzf "${selected}" -C / 2>/dev/null || true
 
         # Restart services
         systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
@@ -2281,7 +2301,7 @@ uninstall_mrtg() {
 
     # Remove cron
     log "INFO" "Removing cron..."
-    crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab -
+    crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab - || true
 
     # Remove logrotate
     if [[ -f /etc/logrotate.d/mrtg ]]; then
@@ -2300,10 +2320,10 @@ uninstall_mrtg() {
         log "INFO" "Removing packages..."
         case "${OS_ID}" in
             ubuntu|debian)
-                apt-get remove --purge -y mrtg snmpd snmp
+                apt-get remove --purge -y mrtg snmpd snmp || true
                 ;;
             centos|rhel|almalinux|rocky|fedora)
-                yum remove -y mrtg net-snmp net-snmp-utils
+                yum remove -y mrtg net-snmp net-snmp-utils || true
                 ;;
         esac
     fi
@@ -2311,14 +2331,12 @@ uninstall_mrtg() {
     # Remove data?
     if confirm_action "Remove all MRTG data?"; then
         log "INFO" "Removing files..."
-        rm -rf "${MRTG_BASE}"
-        rm -rf "${MRTG_VAR}"
-        rm -rf "${WEB_MRTG_DIR}"
+        rm -rf "${MRTG_BASE}" "${MRTG_VAR}" "${WEB_MRTG_DIR}" || true
 
         # Restore SNMP config?
         local snmp_backup=$(ls -1 /etc/snmp/snmpd.conf.backup.* 2>/dev/null | head -1)
         if [[ -n "${snmp_backup}" ]] && confirm_action "Restore original SNMP config?"; then
-            cp "${snmp_backup}" /etc/snmp/snmpd.conf
+            cp "${snmp_backup}" /etc/snmp/snmpd.conf || true
             systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
         fi
     fi
@@ -2544,13 +2562,13 @@ EOF
             ;;
         9)
             if confirm_action "Remove MRTG cron?"; then
-                crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab -
+                crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab - || true
                 log "SUCCESS" "Cron removed"
             fi
             ;;
         10)
             if [[ -f "${MRTG_LOG}/mrtg.log" ]]; then
-                tail -50 "${MRTG_LOG}/mrtg.log"
+                tail -50 "${MRTG_LOG}/mrtg.log" 2>/dev/null || true
             else
                 log "ERROR" "Log not found"
             fi
@@ -2632,8 +2650,8 @@ EOF
 
 main() {
     # Create log file
-    touch "${LOG_FILE}"
-    chmod 644 "${LOG_FILE}"
+    touch "${LOG_FILE}" 2>/dev/null || true
+    chmod 644 "${LOG_FILE}" 2>/dev/null || true
 
     # Parse arguments
     if [[ $# -gt 0 ]]; then
@@ -2718,7 +2736,7 @@ main() {
 
 # Trap
 trap 'rm -f "${LOCK_FILE}"' EXIT
-trap 'error_exit "Interrupted on line $LINENO"' INT TERM
+trap 'error_handler $? $LINENO' ERR
 
 # Run main function
 main "$@"
