@@ -1,7 +1,8 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v1.6.0
+# MRTG Professional Monitoring Suite - Enterprise Edition v1.7.0
 # Production-Hardened Network Monitoring for Hosting Environments
+# With Rspamd Email Filter Monitoring
 #
 # =============================================================================
 # ██╗    ██╗ █████╗ ███████╗██╗         ██╗███████╗ █████╗
@@ -14,17 +15,18 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v1.6.0
+# Version:     v1.7.0
 # Build Date:  02/27/2026
 # License:     MIT
 #
 # DESCRIPTION:
 #   Zero-assumption MRTG installer for production hosting environments
-#   - Detects and works with ANY existing web server (Apache/Nginx/LiteSpeed)
+#   - Detects and works with ANY existing web server
 #   - Full DirectAdmin/cPanel/Plesk integration
-#   - Smart CSF/firewalld/UFW configuration with syntax safety
+#   - Smart CSF firewall configuration with syntax safety
 #   - 3-pass warmup to eliminate first-run errors
 #   - SNMP stabilization delay for slow servers
+#   - Rspamd email filter monitoring (if detected)
 #   - Complete uninstall with rollback
 #   - Real-time health monitoring
 #   - Automatic updates from GitHub
@@ -53,7 +55,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v1.6.0"
+readonly SCRIPT_VERSION="v1.7.0"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -68,6 +70,7 @@ readonly MRTG_LOG="${MRTG_BASE}/logs"
 readonly MRTG_HTML="${MRTG_BASE}/html"
 readonly MRTG_BIN="${MRTG_BASE}/bin"
 readonly MRTG_VAR="/var/lib/mrtg"
+readonly MRTG_SCRIPTS="${MRTG_BASE}/scripts"
 
 # Default values
 DEFAULT_INTERVAL=5
@@ -78,6 +81,7 @@ WEB_USER=""
 WEB_GROUP=""
 WEB_SERVER="unknown"
 PANEL_TYPE="none"
+HAS_RSPAMD=false
 INTERVAL=${DEFAULT_INTERVAL}
 FORCE_MODE=false
 DRY_RUN=false
@@ -391,8 +395,6 @@ detect_web_root() {
         "directadmin")
             if [[ -d "/var/www/html" ]]; then
                 WEB_ROOT="/var/www/html"
-            elif [[ -d "/home/*/domains" ]]; then
-                WEB_ROOT="/var/www/html"
             else
                 WEB_ROOT="/var/www/html"
             fi
@@ -400,8 +402,6 @@ detect_web_root() {
         "cpanel")
             if [[ -d "/usr/local/apache/htdocs" ]]; then
                 WEB_ROOT="/usr/local/apache/htdocs"
-            elif [[ -d "/var/www/html" ]]; then
-                WEB_ROOT="/var/www/html"
             else
                 WEB_ROOT="/usr/local/apache/htdocs"
             fi
@@ -423,8 +423,6 @@ detect_web_root() {
                         WEB_ROOT="/usr/share/nginx/html"
                     elif [[ -d "/var/www/html" ]]; then
                         WEB_ROOT="/var/www/html"
-                    elif [[ -d "/srv/www/htdocs" ]]; then
-                        WEB_ROOT="/srv/www/htdocs"
                     else
                         WEB_ROOT="/var/www/html"
                     fi
@@ -432,10 +430,6 @@ detect_web_root() {
                 "apache")
                     if [[ -d "/var/www/html" ]]; then
                         WEB_ROOT="/var/www/html"
-                    elif [[ -d "/var/www" ]]; then
-                        WEB_ROOT="/var/www"
-                    elif [[ -d "/srv/www/htdocs" ]]; then
-                        WEB_ROOT="/srv/www/htdocs"
                     else
                         WEB_ROOT="/var/www/html"
                     fi
@@ -448,11 +442,7 @@ detect_web_root() {
                     fi
                     ;;
                 "caddy")
-                    if [[ -d "/var/www/html" ]]; then
-                        WEB_ROOT="/var/www/html"
-                    else
-                        WEB_ROOT="/var/www/html"
-                    fi
+                    WEB_ROOT="/var/www/html"
                     ;;
                 *)
                     WEB_ROOT="/var/www/html"
@@ -472,6 +462,21 @@ detect_web_root() {
     mkdir -p "${WEB_MRTG_DIR}"
 
     log "INFO" "Web directory: ${WEB_MRTG_DIR}"
+}
+
+detect_rspamd() {
+    log "INFO" "Checking for Rspamd email filter..."
+
+    if command -v rspamd >/dev/null 2>&1 && systemctl is-active --quiet rspamd 2>/dev/null; then
+        HAS_RSPAMD=true
+        log "SUCCESS" "Rspamd detected - email filtering will be monitored"
+    elif [[ -f /etc/rspamd/rspamd.conf ]]; then
+        HAS_RSPAMD=true
+        log "WARNING" "Rspamd installed but service may not be running"
+    else
+        HAS_RSPAMD=false
+        log "INFO" "Rspamd not detected (optional)"
+    fi
 }
 
 detect_network_interfaces() {
@@ -545,6 +550,7 @@ install_dependencies() {
                 libnet-snmp-perl \
                 openssl \
                 ca-certificates \
+                python3 \
                 --no-install-recommends
             ;;
         centos|rhel|almalinux|rocky|fedora)
@@ -563,14 +569,15 @@ install_dependencies() {
                 perl-IO-Socket-SSL \
                 perl-Net-SNMP \
                 openssl \
-                ca-certificates
+                ca-certificates \
+                python3
             ;;
         *)
             log "WARNING" "Unknown OS, attempting generic installation"
             if command -v yum >/dev/null; then
-                yum install -y mrtg net-snmp net-snmp-utils
+                yum install -y mrtg net-snmp net-snmp-utils python3
             elif command -v apt-get >/dev/null; then
-                apt-get update && apt-get install -y mrtg snmpd snmp
+                apt-get update && apt-get install -y mrtg snmpd snmp python3
             else
                 error_exit "Cannot install packages - unsupported package manager"
             fi
@@ -579,7 +586,7 @@ install_dependencies() {
 
     # Verify installations
     local missing=()
-    for cmd in mrtg snmpd cfgmaker indexmaker; do
+    for cmd in mrtg snmpd cfgmaker indexmaker python3; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then
             missing+=("${cmd}")
         fi
@@ -615,7 +622,7 @@ configure_snmp() {
         cp /etc/snmp/snmpd.conf "/etc/snmp/snmpd.conf.backup.$(date +%Y%m%d-%H%M%S)"
     fi
 
-    # Create secure SNMP configuration
+    # Create base SNMP configuration
     cat > /etc/snmp/snmpd.conf << EOF
 ########################################################################
 # SNMPd Configuration for MRTG
@@ -641,16 +648,13 @@ proc  nginx 10 5
 proc  mysql 10 5
 proc  sshd
 proc  snmpd
+proc  rspamd 5 3
 
 # Disk monitoring
 includeAllDisks 10%
 
 # Load averages
 load 12 10 5
-
-# Network interfaces
-interface eth0
-interface lo
 
 # View definitions
 view   systemonly  included   .1.3.6.1.2.1.1
@@ -668,9 +672,63 @@ access paranoid "" any noauth exact system none none
 
 EOF
 
+    # =====================================================================
+    # RSPAMD MONITORING INTEGRATION
+    # If Rspamd is detected, create a helper script and SNMP extension
+    # =====================================================================
+    if [[ "${HAS_RSPAMD}" == true ]]; then
+        log "INFO" "Configuring Rspamd monitoring..."
+
+        # Create scripts directory
+        mkdir -p "${MRTG_SCRIPTS}"
+
+        # Create Rspamd stats collection script
+        cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
+#!/bin/bash
+# Rspamd Statistics Collector for MRTG
+# Returns: scanned_messages rejected_messages
+
+# Try to get stats from rspamc
+STATS=$(rspamc -j stat 2>/dev/null)
+
+if [ $? -eq 0 ] && [ -n "$STATS" ]; then
+    # Parse JSON output
+    SCANNED=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('scanned', 0))" 2>/dev/null)
+    REJECTED=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('actions', {}).get('reject', 0))" 2>/dev/null)
+
+    # Fallback to zero if parsing failed
+    echo "${SCANNED:-0}"
+    echo "${REJECTED:-0}"
+else
+    # Alternative: check Rspamd stats file
+    if [ -f /var/log/rspamd/stats.log ]; then
+        tail -1 /var/log/rspamd/stats.log | awk '{print $2; print $4}' 2>/dev/null || echo -e "0\n0"
+    else
+        echo -e "0\n0"
+    fi
+fi
+EOF
+
+        chmod +x "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
+
+        # Add SNMP extension for Rspamd
+        echo "# Rspamd Monitoring Extension" >> /etc/snmp/snmpd.conf
+        echo "extend rspamd /bin/sh ${MRTG_SCRIPTS}/get_rspamd_stats.sh" >> /etc/snmp/snmpd.conf
+
+        # Add rspamd user to necessary groups for socket access
+        if id rspamd >/dev/null 2>&1; then
+            usermod -aG rspamd snmpd 2>/dev/null || usermod -aG rspamd snmp 2>/dev/null || true
+        fi
+
+        log "SUCCESS" "Rspamd monitoring configured"
+    fi
+
     chmod 600 /etc/snmp/snmpd.conf
 
-    # Start SNMP service
+    # =====================================================================
+    # CRITICAL: Start SNMP and wait for stabilization
+    # Some servers (especially cloud VPS) need extra time for the service
+    # =====================================================================
     if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
         systemctl unmask snmpd >/dev/null 2>&1 || true
         systemctl enable snmpd >/dev/null 2>&1 || true
@@ -680,9 +738,8 @@ EOF
     fi
 
     # CRITICAL: Wait for SNMP to fully initialize
-    # Some servers (especially cloud VPS) need extra time for the service to bind
-    log "INFO" "Waiting for SNMP to stabilize (3 seconds)..."
-    sleep 3
+    log "INFO" "Waiting 5 seconds for SNMP service to stabilize..."
+    sleep 5
 
     # Verify SNMP is working
     local max_attempts=5
@@ -690,7 +747,7 @@ EOF
     while [[ $attempt -le $max_attempts ]]; do
         if command -v snmpwalk >/dev/null 2>&1; then
             if snmpwalk -v 2c -c "${SNMP_COMMUNITY}" -t 2 127.0.0.1 system 2>/dev/null | grep -q "sysName"; then
-                log "SUCCESS" "SNMP verified"
+                log "SUCCESS" "SNMP verified and responding"
                 break
             fi
         fi
@@ -700,7 +757,7 @@ EOF
     done
 
     if [[ $attempt -gt $max_attempts ]]; then
-        log "WARNING" "SNMP verification failed - check configuration"
+        log "WARNING" "SNMP verification failed - check configuration manually"
     fi
 }
 
@@ -730,8 +787,9 @@ configure_firewall() {
         for port_type in "UDP_IN" "UDP_OUT"; do
             # Check if port 161 is already present
             if ! grep -q "161" /etc/csf/csf.conf; then
-                # Get current value
-                local current=$(grep "^${port_type} =" /etc/csf/csf.conf | cut -d'"' -f2)
+                # Get current value safely
+                local current_line=$(grep "^${port_type} =" /etc/csf/csf.conf | head -1)
+                local current=$(echo "${current_line}" | cut -d'"' -f2)
 
                 # Case 1: Empty string - just set to "161"
                 if [[ -z "${current}" ]]; then
@@ -824,6 +882,7 @@ create_directories() {
         "${MRTG_LOG}"
         "${MRTG_HTML}"
         "${MRTG_BIN}"
+        "${MRTG_SCRIPTS}"
         "${MRTG_VAR}"
         "${BACKUP_DIR}"
         "${WEB_MRTG_DIR}"
@@ -845,6 +904,7 @@ create_directories() {
         chmod 750 "${MRTG_CONF}"
         chmod 755 "${MRTG_LOG}"
         chmod 755 "${MRTG_HTML}"
+        chmod 755 "${MRTG_SCRIPTS}"
         chmod 755 "${WEB_MRTG_DIR}"
     fi
 
@@ -865,7 +925,6 @@ generate_mrtg_config() {
     fi
 
     # Ensure SNMP is ready
-    log "INFO" "Verifying SNMP is responsive..."
     sleep 2
 
     # Try cfgmaker with retries
@@ -904,7 +963,9 @@ generate_mrtg_config() {
         generate_template_config "${cfg_file}"
     fi
 
-    # Append system monitoring
+    # =====================================================================
+    # Add System Monitoring
+    # =====================================================================
     cat >> "${cfg_file}" << EOF
 
 ########################################################################
@@ -959,6 +1020,79 @@ YLegend[processes]: Processes
 Options[processes]: growright, nopercent
 
 EOF
+
+    # =====================================================================
+    # RSPAMD MONITORING (if detected)
+    # =====================================================================
+    if [[ "${HAS_RSPAMD}" == true ]]; then
+        log "INFO" "Adding Rspamd monitoring to configuration..."
+
+        cat >> "${cfg_file}" << EOF
+
+########################################################################
+# Rspamd Email Filter Monitoring
+########################################################################
+# This monitors total scanned messages vs rejected (spam) messages
+# Data is collected via SNMP extend script
+Target[rspamd]: \`${MRTG_SCRIPTS}/get_rspamd_stats.sh\`
+Title[rspamd]: Rspamd Email Statistics
+PageTop[rspamd]: <h1>Rspamd Mail Filter Statistics</h1>
+MaxBytes[rspamd]: 1000000
+ShortLegend[rspamd]: msgs
+YLegend[rspamd]: Messages
+Legend1[rspamd]: Total Scanned
+Legend2[rspamd]: Rejected (Spam)
+Legend3[rspamd]: Max Scanned
+Legend4[rspamd]: Max Rejected
+Options[rspamd]: growright, nopercent, gauge
+
+# Rspamd Learn Statistics (spam/ham learning)
+Target[rspamd_learn]: \`${MRTG_SCRIPTS}/get_rspamd_stats.sh --learn\`
+Title[rspamd_learn]: Rspamd Learning Statistics
+PageTop[rspamd_learn]: <h1>Rspamd Learning Activity</h1>
+MaxBytes[rspamd_learn]: 100000
+ShortLegend[rspamd_learn]: msgs
+YLegend[rspamd_learn]: Messages
+Legend1[rspamd_learn]: Spam Learnt
+Legend2[rspamd_learn]: Ham Learnt
+Options[rspamd_learn]: growright, nopercent, gauge
+
+EOF
+
+        # Create enhanced learning stats script if rspamd has learn counts
+        cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
+#!/bin/bash
+# Enhanced Rspamd Statistics Collector for MRTG
+
+# Parse command line arguments
+if [[ "$1" == "--learn" ]]; then
+    # Return learning statistics (spam/ham)
+    STATS=$(rspamc -j stat 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$STATS" ]; then
+        SPAM_LEARNT=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('actions', {}).get('learn_spam', 0))" 2>/dev/null)
+        HAM_LEARNT=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('actions', {}).get('learn_ham', 0))" 2>/dev/null)
+        echo "${SPAM_LEARNT:-0}"
+        echo "${HAM_LEARNT:-0}"
+    else
+        echo -e "0\n0"
+    fi
+else
+    # Return main statistics (scanned/rejected)
+    STATS=$(rspamc -j stat 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$STATS" ]; then
+        SCANNED=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('scanned', 0))" 2>/dev/null)
+        REJECTED=$(echo "$STATS" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('actions', {}).get('reject', 0))" 2>/dev/null)
+        echo "${SCANNED:-0}"
+        echo "${REJECTED:-0}"
+    else
+        echo -e "0\n0"
+    fi
+fi
+EOF
+        chmod +x "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
+
+        log "SUCCESS" "Rspamd monitoring added to configuration"
+    fi
 
     log "SUCCESS" "Configuration saved to ${cfg_file}"
 }
@@ -1173,13 +1307,13 @@ configure_panel_integration() {
             cat > "${mrtg_plugin}/plugin.conf" << EOF
 name=MRTG Network Monitor
 version=${SCRIPT_VERSION}
-desc=Enterprise network monitoring and bandwidth graphing
+desc=Enterprise network monitoring with Rspamd email filtering
 url=/plugins/mrtg-monitor/admin/
 icon=graph.png
 level=admin
 EOF
 
-            # Admin interface
+            # Admin interface with Rspamd info if detected
             cat > "${mrtg_plugin}/admin/index.html" << EOF
 <!DOCTYPE html>
 <html>
@@ -1190,6 +1324,10 @@ EOF
         body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
         .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
         .content { background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .stats { display: flex; gap: 20px; margin-bottom: 20px; }
+        .stat-box { background: #f8f9fa; padding: 15px; border-radius: 5px; flex: 1; text-align: center; }
+        .stat-box h3 { margin: 0 0 10px 0; color: #666; }
+        .stat-box .value { font-size: 24px; font-weight: bold; color: #667eea; }
         iframe { border: 1px solid #ddd; border-radius: 5px; background: white; width: 100%; height: 800px; }
     </style>
 </head>
@@ -1199,6 +1337,21 @@ EOF
         <p>DirectAdmin Integration | Version ${SCRIPT_VERSION}</p>
     </div>
     <div class="content">
+EOF
+
+            # Add Rspamd stats if detected
+            if [[ "${HAS_RSPAMD}" == true ]]; then
+                cat >> "${mrtg_plugin}/admin/index.html" << EOF
+        <div class="stats">
+            <div class="stat-box">
+                <h3>Email Filter Status</h3>
+                <div class="value">Active</div>
+            </div>
+        </div>
+EOF
+            fi
+
+            cat >> "${mrtg_plugin}/admin/index.html" << EOF
         <iframe src="/mrtg/" frameborder="0"></iframe>
     </div>
 </body>
@@ -1409,8 +1562,29 @@ verify_system_health() {
     done
     echo -e "  ${GREEN}✓${NC} Monitoring ${monitored} interfaces"
 
-    # 7. Firewall Status
-    echo -e "\n${BOLD}7. Firewall Configuration${NC}"
+    # 7. Rspamd Check (if installed)
+    if [[ "${HAS_RSPAMD}" == true ]]; then
+        echo -e "\n${BOLD}7. Rspamd Email Filter${NC}"
+        if systemctl is-active --quiet rspamd 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} Rspamd service running"
+
+            # Test Rspamd stats collection
+            if [[ -x "${MRTG_SCRIPTS}/get_rspamd_stats.sh" ]]; then
+                local rspamd_test=$("${MRTG_SCRIPTS}/get_rspamd_stats.sh" 2>/dev/null)
+                if [[ -n "${rspamd_test}" ]] && [[ "${rspamd_test}" != "0\n0" ]]; then
+                    echo -e "  ${GREEN}✓${NC} Rspamd stats collecting"
+                else
+                    echo -e "  ${YELLOW}⚠${NC} Rspamd stats available but no data yet"
+                fi
+            fi
+        else
+            echo -e "  ${YELLOW}⚠${NC} Rspamd installed but not running"
+            ((warnings++))
+        fi
+    fi
+
+    # 8. Firewall Status
+    echo -e "\n${BOLD}8. Firewall Configuration${NC}"
     if [[ -f /etc/csf/csf.conf ]]; then
         if grep -q "161" /etc/csf/csf.conf; then
             echo -e "  ${GREEN}✓${NC} CSF allows SNMP (port 161)"
@@ -1457,7 +1631,7 @@ repair_installation() {
     else
         service snmpd restart
     fi
-    sleep 3
+    sleep 5
 
     # Regenerate config
     generate_mrtg_config
@@ -1509,6 +1683,7 @@ backup_config() {
         --exclude="${MRTG_VAR}/*" \
         "${MRTG_CONF}" \
         "${MRTG_BIN}" \
+        "${MRTG_SCRIPTS}" \
         /etc/snmp/snmpd.conf \
         2>/dev/null || true
 
@@ -1522,6 +1697,7 @@ Web User: ${WEB_USER}
 Web Root: ${WEB_ROOT}
 SNMP: ${SNMP_COMMUNITY}
 Panel: ${PANEL_TYPE}
+Rspamd: ${HAS_RSPAMD}
 Interval: ${INTERVAL}
 EOF
 
@@ -1568,7 +1744,7 @@ restore_config() {
 
         # Restart services
         systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
-        sleep 3
+        sleep 5
 
         # Re-add cron
         setup_cron
@@ -1674,6 +1850,7 @@ This installer will:
   ✓ Configure secure SNMP monitoring
   ✓ Set up automatic data collection
   ✓ Integrate with your control panel
+  ✓ Monitor Rspamd email filter (if detected)
   ✓ NEVER modify your web server
 
 EOF
@@ -1683,6 +1860,7 @@ EOF
     detect_os
     detect_control_panel
     detect_web_server
+    detect_rspamd
 
     echo -e "\n${BOLD}Detected Configuration:${NC}"
     echo -e "  OS: ${GREEN}${OS_NAME} ${OS_VERSION}${NC}"
@@ -1692,6 +1870,10 @@ EOF
 
     if [[ "${PANEL_TYPE}" != "none" ]]; then
         echo -e "  Control Panel: ${GREEN}${PANEL_TYPE}${NC}"
+    fi
+
+    if [[ "${HAS_RSPAMD}" == true ]]; then
+        echo -e "  Email Filter: ${GREEN}Rspamd detected - will be monitored${NC}"
     fi
 
     echo -e "\n${BOLD}Configuration:${NC}"
@@ -1708,6 +1890,7 @@ EOF
     echo -e "  Interval: ${INTERVAL} minutes"
     echo -e "  SNMP: ${SNMP_COMMUNITY:-"<auto-generated>"}"
     echo -e "  Email: ${DEFAULT_EMAIL}"
+    echo -e "  Rspamd Monitoring: ${HAS_RSPAMD}"
     echo ""
 
     if ! confirm_action "Proceed with installation?"; then
@@ -1738,6 +1921,7 @@ WEB_GROUP="${WEB_GROUP}"
 WEB_SERVER="${WEB_SERVER}"
 SNMP_COMMUNITY="${SNMP_COMMUNITY}"
 PANEL_TYPE="${PANEL_TYPE}"
+HAS_RSPAMD="${HAS_RSPAMD}"
 INTERVAL="${INTERVAL}"
 INSTALL_DATE="$(date)"
 SCRIPT_VERSION="${SCRIPT_VERSION}"
@@ -1753,8 +1937,13 @@ EOF
     echo -e "Access MRTG: ${BLUE}http://${server_ip}/mrtg/${NC}"
     echo -e "SNMP Community: ${YELLOW}${SNMP_COMMUNITY}${NC} (keep secure!)"
     echo -e "Configuration: ${CYAN}${MRTG_CONF}/mrtg.cfg${NC}"
-    echo -e "Logs: ${CYAN}${MRTG_LOG}/mrtg.log${NC}\n"
+    echo -e "Logs: ${CYAN}${MRTG_LOG}/mrtg.log${NC}"
 
+    if [[ "${HAS_RSPAMD}" == true ]]; then
+        echo -e "Rspamd Graphs: ${CYAN}http://${server_ip}/mrtg/rspamd.html${NC}"
+    fi
+
+    echo ""
     verify_system_health
 }
 
@@ -1795,10 +1984,12 @@ EOF
         2) uninstall_mrtg ;;
         3)
             detect_web_server
+            detect_rspamd
             verify_system_health
             ;;
         4)
             detect_web_server
+            detect_rspamd
             repair_installation
             ;;
         5) backup_config ;;
@@ -1868,17 +2059,18 @@ ${BOLD}OPTIONS${NC}
     --help, -h        Show this help
 
 ${BOLD}EXAMPLES${NC}
-    ${SCRIPT_NAME} --install      # Install MRTG
-    ${SCRIPT_NAME} --status       # Check health
-    ${SCRIPT_NAME} --repair       # Fix issues
-    ${SCRIPT_NAME} --update       # Update script
-    ${SCRIPT_NAME} --uninstall    # Remove MRTG
+    ${SCRIPT_NAME} --install      # Install MRTG with Rspamd monitoring
+    ${SCRIPT_NAME} --status       # Check system health
+    ${SCRIPT_NAME} --repair       # Fix common issues
+    ${SCRIPT_NAME} --update       # Update script from GitHub
+    ${SCRIPT_NAME} --uninstall    # Remove MRTG completely
 
 ${BOLD}FILES${NC}
-    ${MRTG_BASE}         Installation
-    ${MRTG_CONF}         Configuration
+    ${MRTG_BASE}         Main installation directory
+    ${MRTG_CONF}         Configuration files
     ${MRTG_LOG}          Log files
-    ${BACKUP_DIR}        Backups
+    ${MRTG_SCRIPTS}      Helper scripts (Rspamd, etc)
+    ${BACKUP_DIR}        Backup storage
 
 ${BOLD}AUTHOR${NC}
     Written by ${SCRIPT_AUTHOR}
@@ -1912,11 +2104,13 @@ main() {
             --status|-s)
                 check_root
                 detect_web_server
+                detect_rspamd
                 verify_system_health
                 ;;
             --repair|-r)
                 check_root
                 detect_web_server
+                detect_rspamd
                 repair_installation
                 ;;
             --backup|-b)
