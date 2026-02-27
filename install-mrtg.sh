@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v1.9.0
+# MRTG Professional Monitoring Suite - Enterprise Edition v2.0.0
 # Production-Hardened Network Monitoring for Hosting Environments
-# With Full Service Detection & Socket-Aware Monitoring
+# With Advanced Service Detection & Socket-Aware Monitoring
 #
 # =============================================================================
 # ██╗    ██╗ █████╗ ███████╗██╗         ██╗███████╗ █████╗
@@ -15,19 +15,19 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v1.9.0
+# Version:     v2.0.0
 # Build Date:  02/27/2026
 # License:     MIT
 #
 # DESCRIPTION:
 #   Zero-assumption MRTG installer for production hosting environments
 #   - Detects and works with ANY existing web server
-#   - Full DirectAdmin/cPanel/Plesk integration
+#   - Full DirectAdmin/cPanel/Plesk integration with proper plugin flags
 #   - Smart CSF firewall configuration with syntax safety
 #   - 3-pass warmup to eliminate first-run errors
 #   - SNMP stabilization delay for slow servers
 #   - Socket-aware service detection (MySQL, Rspamd, etc.)
-#   - Cron lockfile to prevent race conditions
+#   - Process lockfile to prevent cron race conditions
 #   - Complete uninstall with rollback
 #   - Real-time health monitoring
 #   - Automatic updates from GitHub
@@ -45,6 +45,7 @@
 #   --update, -U      Self-update from GitHub
 #   --dry-run         Test without changes
 #   --force           Skip confirmations
+#   --version, -v     Show version
 #   --help, -h        Show this help
 #
 # =============================================================================
@@ -56,7 +57,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v1.9.0"
+readonly SCRIPT_VERSION="v2.0.0"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -478,20 +479,48 @@ detect_web_root() {
 detect_rspamd() {
     log "INFO" "Checking for Rspamd email filter..."
 
-    if command -v rspamd >/dev/null 2>&1 && systemctl is-active --quiet rspamd 2>/dev/null; then
-        HAS_RSPAMD=true
-        log "SUCCESS" "Rspamd detected - email filtering will be monitored"
-    elif [[ -f /etc/rspamd/rspamd.conf ]]; then
-        HAS_RSPAMD=true
-        log "WARNING" "Rspamd installed but service may not be running"
+    if command -v rspamd >/dev/null 2>&1; then
+        # Check if service is running
+        if systemctl is-active --quiet rspamd 2>/dev/null || pgrep rspamd >/dev/null 2>&1; then
+            HAS_RSPAMD=true
+            log "SUCCESS" "Rspamd detected and running"
+
+            # =================================================================
+            # CRITICAL: Ensure web user can access Rspamd socket
+            # =================================================================
+            if getent group rspamd >/dev/null; then
+                usermod -aG rspamd "${WEB_USER}" >/dev/null 2>&1 || true
+                # Also add common service users
+                for user in snmp snmpd www-data apache nginx nobody; do
+                    if id "${user}" >/dev/null 2>&1; then
+                        usermod -aG rspamd "${user}" >/dev/null 2>&1 || true
+                    fi
+                done
+                log "DEBUG" "Added users to rspamd group for socket access"
+            fi
+        else
+            HAS_RSPAMD=false
+            log "INFO" "Rspamd installed but not running"
+        fi
     else
         HAS_RSPAMD=false
-        log "INFO" "Rspamd not detected (optional)"
+        log "INFO" "Rspamd not detected"
     fi
 }
 
 detect_mysql_socket() {
-    # Check common MySQL socket locations
+    MYSQL_SOCKET=""
+
+    # Method 1: Try mysql_config
+    if command -v mysql_config >/dev/null 2>&1; then
+        MYSQL_SOCKET=$(mysql_config --socket 2>/dev/null)
+        if [[ -n "${MYSQL_SOCKET}" ]] && [[ -S "${MYSQL_SOCKET}" ]]; then
+            log "DEBUG" "Found MySQL socket via mysql_config: ${MYSQL_SOCKET}"
+            return 0
+        fi
+    fi
+
+    # Method 2: Check common socket locations
     local socket_locations=(
         "/var/lib/mysql/mysql.sock"
         "/tmp/mysql.sock"
@@ -499,6 +528,9 @@ detect_mysql_socket() {
         "/var/run/mysql/mysql.sock"
         "/var/lib/mysqld/mysqld.sock"
         "/var/run/mariadb/mariadb.sock"
+        "/var/lib/mariadb/mariadb.sock"
+        "/var/lib/mysql/mysql.sock"
+        "/var/run/mysqld/mysqld.sock"
     )
 
     for loc in "${socket_locations[@]}"; do
@@ -509,16 +541,30 @@ detect_mysql_socket() {
         fi
     done
 
-    # Try to get socket from mysql config
+    # Method 3: Try to extract from running process
+    if pgrep mysqld >/dev/null 2>&1; then
+        local pid=$(pgrep mysqld | head -1)
+        if [[ -n "${pid}" ]]; then
+            # Try to get socket from /proc
+            MYSQL_SOCKET=$(ls -l /proc/${pid}/fd 2>/dev/null | grep socket | grep -o '/[^ ]*\.sock' | head -1)
+            if [[ -n "${MYSQL_SOCKET}" ]] && [[ -S "${MYSQL_SOCKET}" ]]; then
+                log "DEBUG" "Found MySQL socket from process: ${MYSQL_SOCKET}"
+                return 0
+            fi
+        fi
+    fi
+
+    # Method 4: Try MySQL client with connection
     if command -v mysql >/dev/null 2>&1; then
-        local config_socket=$(mysql --help 2>/dev/null | grep -o "/.*\.sock" | head -1)
-        if [[ -n "${config_socket}" ]] && [[ -S "${config_socket}" ]]; then
-            MYSQL_SOCKET="${config_socket}"
-            log "DEBUG" "Found MySQL socket from config: ${MYSQL_SOCKET}"
+        local test_socket=$(mysql -e "SHOW VARIABLES LIKE 'socket'" 2>/dev/null | grep socket | awk '{print $2}')
+        if [[ -n "${test_socket}" ]] && [[ -S "${test_socket}" ]]; then
+            MYSQL_SOCKET="${test_socket}"
+            log "DEBUG" "Found MySQL socket from query: ${MYSQL_SOCKET}"
             return 0
         fi
     fi
 
+    log "WARNING" "Could not find MySQL socket - will use TCP connection"
     MYSQL_SOCKET=""
     return 1
 }
@@ -532,14 +578,9 @@ detect_mysql() {
            systemctl is-active --quiet mariadb 2>/dev/null || \
            pgrep mysqld >/dev/null 2>&1; then
 
-            # Check for socket
-            if detect_mysql_socket; then
-                HAS_MYSQL=true
-                log "SUCCESS" "MySQL/MariaDB detected (socket: ${MYSQL_SOCKET})"
-            else
-                HAS_MYSQL=true
-                log "WARNING" "MySQL detected but no socket found - using TCP connection"
-            fi
+            HAS_MYSQL=true
+            log "SUCCESS" "MySQL/MariaDB detected"
+            detect_mysql_socket
         fi
     fi
 }
@@ -547,38 +588,41 @@ detect_mysql() {
 detect_redis() {
     log "INFO" "Checking for Redis..."
 
-    if command -v redis-server >/dev/null 2>&1 && systemctl is-active --quiet redis 2>/dev/null; then
-        HAS_REDIS=true
-        log "SUCCESS" "Redis detected"
-    elif command -v redis-cli >/dev/null 2>&1 && redis-cli ping >/dev/null 2>&1; then
-        HAS_REDIS=true
-        log "SUCCESS" "Redis detected (responding to ping)"
-    else
-        HAS_REDIS=false
+    if command -v redis-server >/dev/null 2>&1; then
+        if systemctl is-active --quiet redis 2>/dev/null || \
+           systemctl is-active --quiet redis-server 2>/dev/null || \
+           pgrep redis-server >/dev/null 2>&1; then
+            HAS_REDIS=true
+            log "SUCCESS" "Redis detected"
+        elif command -v redis-cli >/dev/null 2>&1 && redis-cli ping >/dev/null 2>&1; then
+            HAS_REDIS=true
+            log "SUCCESS" "Redis detected (responding to ping)"
+        fi
     fi
 }
 
 detect_exim() {
     log "INFO" "Checking for Exim MTA..."
 
-    if command -v exim >/dev/null 2>&1 && (systemctl is-active --quiet exim 2>/dev/null || \
-       systemctl is-active --quiet exim4 2>/dev/null || pgrep exim >/dev/null 2>&1); then
-        HAS_EXIM=true
-        log "SUCCESS" "Exim detected"
-    else
-        HAS_EXIM=false
+    if command -v exim >/dev/null 2>&1 || command -v exim4 >/dev/null 2>&1; then
+        if systemctl is-active --quiet exim 2>/dev/null || \
+           systemctl is-active --quiet exim4 2>/dev/null || \
+           pgrep exim >/dev/null 2>&1; then
+            HAS_EXIM=true
+            log "SUCCESS" "Exim detected"
+        fi
     fi
 }
 
 detect_dovecot() {
     log "INFO" "Checking for Dovecot IMAP/POP3..."
 
-    if command -v dovecot >/dev/null 2>&1 && (systemctl is-active --quiet dovecot 2>/dev/null || \
-       pgrep dovecot >/dev/null 2>&1); then
-        HAS_DOVECOT=true
-        log "SUCCESS" "Dovecot detected"
-    else
-        HAS_DOVECOT=false
+    if command -v dovecot >/dev/null 2>&1 || command -v doveadm >/dev/null 2>&1; then
+        if systemctl is-active --quiet dovecot 2>/dev/null || \
+           pgrep dovecot >/dev/null 2>&1; then
+            HAS_DOVECOT=true
+            log "SUCCESS" "Dovecot detected"
+        fi
     fi
 }
 
@@ -1020,39 +1064,24 @@ EOF
     chmod 755 "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
 
     # =====================================================================
-    # CRITICAL: Fix Rspamd socket permissions
-    # Add web user and snmp users to rspamd group for socket access
+    # CRITICAL: Fix Rspamd socket permissions (already added users in detect)
+    # Also fix socket directory permissions
     # =====================================================================
-    if getent group rspamd >/dev/null; then
-        # Add users to rspamd group
-        usermod -aG rspamd "${WEB_USER}" >/dev/null 2>&1 || true
+    if [[ -d /var/run/rspamd ]]; then
+        chmod 755 /var/run/rspamd
+        chown -R rspamd:rspamd /var/run/rspamd 2>/dev/null || true
+    fi
 
-        # Also add common service users
-        for user in snmp snmpd www-data apache nginx nobody; do
-            if id "${user}" >/dev/null 2>&1; then
-                usermod -aG rspamd "${user}" >/dev/null 2>&1 || true
-            fi
-        done
-
-        # Fix rspamd socket directory permissions
-        if [[ -d /var/run/rspamd ]]; then
-            chmod 755 /var/run/rspamd
-            chown -R rspamd:rspamd /var/run/rspamd 2>/dev/null || true
-        fi
-
-        # For systemd systems, ensure socket permissions
-        if command -v systemctl >/dev/null 2>&1; then
-            # Create drop-in directory for rspamd service
-            mkdir -p /etc/systemd/system/rspamd.service.d
-            cat > /etc/systemd/system/rspamd.service.d/override.conf << EOF
+    # For systemd systems, create drop-in for socket permissions
+    if command -v systemctl >/dev/null 2>&1 && [[ -f /etc/systemd/system/rspamd.service ]]; then
+        mkdir -p /etc/systemd/system/rspamd.service.d
+        cat > /etc/systemd/system/rspamd.service.d/override.conf << EOF
 [Service]
 SupplementaryGroups=rspamd
 EOF
-            systemctl daemon-reload 2>/dev/null || true
-            systemctl restart rspamd 2>/dev/null || true
-        fi
-
-        log "SUCCESS" "Rspamd group permissions fixed"
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl restart rspamd 2>/dev/null || true
+        log "DEBUG" "Created systemd drop-in for rspamd socket permissions"
     fi
 
     log "SUCCESS" "Rspamd monitoring helpers installed"
@@ -1197,10 +1226,11 @@ EOF
     if [[ "${HAS_MYSQL}" == true ]]; then
         log "INFO" "Adding MySQL monitoring to configuration..."
 
-        # Use socket if available, otherwise fall back to TCP
+        # Build MySQL command with socket if available
         local mysql_cmd="mysql"
         if [[ -n "${MYSQL_SOCKET}" ]]; then
             mysql_cmd="mysql --socket=${MYSQL_SOCKET}"
+            log "INFO" "Using MySQL socket: ${MYSQL_SOCKET}"
         fi
 
         cat >> "${cfg_file}" << EOF
@@ -1371,8 +1401,8 @@ setup_cron() {
     # Create runner script with lockfile to prevent overlapping executions
     cat > "${MRTG_BIN}/run-mrtg.sh" << 'EOF'
 #!/bin/bash
-# MRTG Runner - Generated by MRTG Professional Suite
-# Includes lockfile to prevent race conditions
+# MRTG Runner - Generated by MRTG Professional Suite v2.0.0
+# Includes lockfile to prevent race conditions on high-traffic servers
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LANG=en_US.UTF-8
@@ -1391,14 +1421,23 @@ log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOGFILE}"
 }
 
+# Function to check if process is really running
+is_process_running() {
+    local pid=$1
+    if [[ -d "/proc/${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 # Check if another instance is running
 if [[ -f "${LOCKFILE}" ]]; then
     pid=$(cat "${LOCKFILE}")
-    if kill -0 "${pid}" 2>/dev/null; then
-        log_message "Previous MRTG instance still running (PID: ${pid}). Exiting."
+    if is_process_running "${pid}"; then
+        log_message "Previous MRTG instance still running (PID: ${pid}). Exiting to prevent data corruption."
         exit 1
     else
-        log_message "Removing stale lockfile"
+        log_message "Removing stale lockfile from PID ${pid}"
         rm -f "${LOCKFILE}"
     fi
 fi
@@ -1514,7 +1553,7 @@ EOF
 # DIRECTADMIN PLUGIN INTEGRATION (with proper DA flags)
 # =============================================================================
 configure_panel_integration() {
-    if [[ "${PANEL_TYPE}" == "none" ]] || [[ "${DRY_RUN" == true ]]; then
+    if [[ "${PANEL_TYPE}" == "none" ]] || [[ "${DRY_RUN}" == true ]]; then
         return 0
     fi
 
@@ -1749,6 +1788,14 @@ verify_system_health() {
     if crontab -l 2>/dev/null | grep -q "run-mrtg.sh"; then
         local cron_line=$(crontab -l 2>/dev/null | grep "run-mrtg.sh" | head -1 | awk '{$1=$2=$3=$4=$5=""; print $0}' | xargs)
         echo -e "  ${GREEN}✓${NC} Cron job active with lockfile protection"
+
+        # Check if lockfile mechanism is working
+        if [[ -f "/tmp/mrtg_cron.lock" ]]; then
+            local lock_pid=$(cat "/tmp/mrtg_cron.lock" 2>/dev/null)
+            if [[ -n "${lock_pid}" ]] && kill -0 "${lock_pid}" 2>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} Lockfile active (PID: ${lock_pid})"
+            fi
+        fi
     else
         echo -e "  ${RED}✗${NC} No cron job found"
         ((errors++))
@@ -1827,7 +1874,7 @@ verify_system_health() {
     # 7. Rspamd Check
     if [[ "${HAS_RSPAMD}" == true ]]; then
         echo -e "\n${BOLD}7. Rspamd Email Filter${NC}"
-        if systemctl is-active --quiet rspamd 2>/dev/null; then
+        if systemctl is-active --quiet rspamd 2>/dev/null || pgrep rspamd >/dev/null; then
             echo -e "  ${GREEN}✓${NC} Rspamd service running"
 
             # Test Rspamd stats collection
@@ -1835,6 +1882,11 @@ verify_system_health() {
                 local rspamd_test=$(timeout 3 "${MRTG_SCRIPTS}/get_rspamd_stats.sh" 2>/dev/null)
                 if [[ -n "${rspamd_test}" ]] && echo "${rspamd_test}" | grep -q '^[0-9]\+'; then
                     echo -e "  ${GREEN}✓${NC} Rspamd stats collecting"
+
+                    # Check if user is in rspamd group
+                    if id "${WEB_USER}" | grep -q rspamd; then
+                        echo -e "  ${GREEN}✓${NC} ${WEB_USER} has rspamd group access"
+                    fi
                 else
                     echo -e "  ${YELLOW}⚠${NC} Rspamd stats unavailable - check socket permissions"
                     ((warnings++))
