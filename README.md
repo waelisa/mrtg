@@ -1,7 +1,7 @@
 # 📊 MRTG Professional Monitoring Suite - Enterprise Edition
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2.1.2-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.1.4-blue.svg)](#)
 [![Bash](https://img.shields.io/badge/Shell-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 
 The definitive, zero-assumption MRTG installer for production hosting environments.
