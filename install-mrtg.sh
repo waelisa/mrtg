@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# MRTG Professional Monitoring Suite - Enterprise Edition v2.2.9
+# MRTG Professional Monitoring Suite - Enterprise Edition v2.3.0
 # Production-Hardened Network Monitoring for Hosting Environments
 # The definitive MRTG installer for hosting environments
 #
@@ -15,27 +15,9 @@
 #
 # Author:      Wael Isa
 # GitHub:      https://github.com/waelisa/mrtg
-# Version:     v2.2.9
+# Version:     v2.3.0
 # Build Date:  02/28/2026
 # License:     MIT
-#
-# DESCRIPTION:
-#   The definitive MRTG installer for production hosting environments
-#   - Zero-assumption architecture works with ANY existing setup
-#   - Full DirectAdmin/cPanel/Plesk integration with native plugins
-#   - Smart CSF firewall configuration with syntax safety
-#   - 3-pass warmup with validation to eliminate first-run errors
-#   - SNMP stabilization delay for slow servers
-#   - Socket-aware service detection (MySQL, Rspamd, etc.)
-#   - Process lockfile to prevent cron race conditions
-#   - Automated log rotation to prevent disk exhaustion
-#   - Timeout-protected Rspamd polling for busy mail servers
-#   - Deep MySQL thread monitoring for connection analysis
-#   - Auto-mode for unattended installations
-#   - Nice/ionice CPU prioritization
-#   - Complete uninstall with rollback
-#   - Real-time health monitoring
-#   - Automatic updates from GitHub
 #
 # USAGE:
 #   ./install-mrtg.sh [OPTIONS]
@@ -56,7 +38,6 @@
 #
 # =============================================================================
 
-# Enable strict mode but with better error handling
 set -euo pipefail
 set -E
 IFS=$'\n\t'
@@ -65,7 +46,7 @@ IFS=$'\n\t'
 # GLOBAL CONSTANTS
 # =============================================================================
 
-readonly SCRIPT_VERSION="v2.2.9"
+readonly SCRIPT_VERSION="v2.3.0"
 readonly SCRIPT_AUTHOR="Wael Isa"
 readonly REPO_URL="https://raw.githubusercontent.com/waelisa/mrtg/main/install-mrtg.sh"
 readonly LOG_FILE="/var/log/mrtg-installer.log"
@@ -105,9 +86,10 @@ INTERVAL=${DEFAULT_INTERVAL}
 FORCE_MODE=false
 DRY_RUN=false
 AUTO_MODE=false
-DEBUG=${DEBUG:-}  # Default DEBUG to empty string to avoid unbound variable
+DEBUG=${DEBUG:-}
+OS_ID="unknown"
 
-# Color codes - properly escaped for output
+# Color codes
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -115,14 +97,13 @@ readonly BLUE='\033[0;34m'
 readonly MAGENTA='\033[0;35m'
 readonly CYAN='\033[0;36m'
 readonly WHITE='\033[1;37m'
-readonly NC='\033[0m' # No Color
+readonly NC='\033[0m'
 readonly BOLD='\033[1m'
 
 # =============================================================================
 # ERROR HANDLING
 # =============================================================================
 
-# Trap any error to print line number and exit
 trap 'error_handler $? $LINENO' ERR
 
 error_handler() {
@@ -156,7 +137,7 @@ log() {
             *)         echo -e "${message}" ;;
         esac
     fi
-    return 0  # Always return success to avoid breaking pipelines
+    return 0
 }
 
 error_exit() {
@@ -198,29 +179,23 @@ acquire_lock() {
 }
 
 # =============================================================================
-# FIXED: IP Address Detection Function
+# IP ADDRESS DETECTION
 # =============================================================================
 detect_ip_address() {
     local ip=""
 
-    # Try multiple methods to get the primary IP address
-
-    # Method 1: Get IP from default route (most reliable)
     if command -v ip >/dev/null 2>&1; then
         ip=$(ip route get 1 2>/dev/null | awk '{print $NF;exit}' | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" || true)
     fi
 
-    # Method 2: Try hostname -I (shows all IPs, take first)
     if [[ -z "${ip}" ]] && command -v hostname >/dev/null 2>&1; then
         ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
     fi
 
-    # Method 3: Try ifconfig
     if [[ -z "${ip}" ]] && command -v ifconfig >/dev/null 2>&1; then
         ip=$(ifconfig 2>/dev/null | grep -E 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' || true)
     fi
 
-    # Method 4: Try external service (if internet available)
     if [[ -z "${ip}" ]] && command -v curl >/dev/null 2>&1; then
         ip=$(curl -s --max-time 2 ifconfig.me 2>/dev/null || echo "")
     fi
@@ -229,12 +204,11 @@ detect_ip_address() {
         ip=$(wget -qO- --timeout=2 ifconfig.me 2>/dev/null || echo "")
     fi
 
-    # If all methods fail, return localhost
     echo "${ip:-localhost}"
 }
 
 # =============================================================================
-# SELF-UPDATE FUNCTION
+# SELF-UPDATE
 # =============================================================================
 
 self_update() {
@@ -243,7 +217,6 @@ self_update() {
     local tmp_file="/tmp/mrtg_update_$$.sh"
     local backup_file="/tmp/mrtg_backup_$$.sh"
 
-    # Download latest version
     if command -v curl >/dev/null 2>&1; then
         if ! curl -s -o "${tmp_file}" "${REPO_URL}"; then
             log "ERROR" "Failed to download update"
@@ -259,14 +232,12 @@ self_update() {
         return 1
     fi
 
-    # Check if download was successful
     if [[ ! -s "${tmp_file}" ]]; then
         log "ERROR" "Downloaded file is empty"
         rm -f "${tmp_file}"
         return 1
     fi
 
-    # Get versions
     local current_ver=$(grep "^readonly SCRIPT_VERSION=" "$0" | cut -d'"' -f2)
     local new_ver=$(grep "^readonly SCRIPT_VERSION=" "${tmp_file}" | cut -d'"' -f2)
 
@@ -284,11 +255,9 @@ self_update() {
 
     log "INFO" "Current version: ${current_ver}, New version: ${new_ver}"
 
-    # Backup current script
     cp "$0" "${backup_file}"
     chmod 644 "${backup_file}"
 
-    # Apply update
     if cp "${tmp_file}" "$0"; then
         chmod +x "$0"
         log "SUCCESS" "Updated to version ${new_ver}"
@@ -331,7 +300,6 @@ detect_control_panel() {
     PANEL_TYPE="none"
     PANEL_VERSION="unknown"
 
-    # DirectAdmin
     if [[ -d /usr/local/directadmin ]]; then
         PANEL_TYPE="directadmin"
         if [[ -f /usr/local/directadmin/conf/directadmin.conf ]]; then
@@ -339,7 +307,6 @@ detect_control_panel() {
         fi
         log "SUCCESS" "DirectAdmin detected (v${PANEL_VERSION})"
 
-    # cPanel
     elif [[ -d /usr/local/cpanel ]]; then
         PANEL_TYPE="cpanel"
         if command -v /usr/local/cpanel/cpanel >/dev/null 2>&1; then
@@ -347,7 +314,6 @@ detect_control_panel() {
         fi
         log "SUCCESS" "cPanel detected (v${PANEL_VERSION})"
 
-    # Plesk
     elif [[ -d /usr/local/psa ]]; then
         PANEL_TYPE="plesk"
         if command -v plesk >/dev/null 2>&1; then
@@ -355,17 +321,14 @@ detect_control_panel() {
         fi
         log "SUCCESS" "Plesk detected (v${PANEL_VERSION})"
 
-    # ISPConfig
     elif [[ -d /usr/local/ispconfig ]]; then
         PANEL_TYPE="ispconfig"
         log "SUCCESS" "ISPConfig detected"
 
-    # VestaCP
     elif [[ -d /usr/local/vesta ]]; then
         PANEL_TYPE="vestacp"
         log "SUCCESS" "VestaCP detected"
 
-    # Webmin/Virtualmin
     elif [[ -d /usr/share/webmin ]] || [[ -d /usr/libexec/webmin ]]; then
         PANEL_TYPE="webmin"
         log "SUCCESS" "Webmin detected"
@@ -377,7 +340,6 @@ detect_web_server() {
 
     local web_servers_found=()
 
-    # Check for running processes
     if pgrep -x "nginx" >/dev/null 2>&1; then
         WEB_SERVER="nginx"
         WEB_USER=$(ps aux | grep nginx | grep -v grep | head -1 | awk '{print $1}' || true)
@@ -418,7 +380,6 @@ detect_web_server() {
         web_servers_found+=("caddy (active)")
     fi
 
-    # Panel-specific overrides
     if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
         WEB_USER="diradmin"
         WEB_GROUP="diradmin"
@@ -435,10 +396,8 @@ detect_web_server() {
         WEB_SERVER="apache"
     fi
 
-    # If multiple servers found, prioritize
     if [[ ${#web_servers_found[@]} -gt 1 ]]; then
         log "WARNING" "Multiple web servers detected: ${web_servers_found[*]}"
-        # Priority: nginx > apache > litespeed
         for server in nginx apache litespeed openlitespeed caddy; do
             if [[ " ${web_servers_found[*]} " =~ ${server} ]]; then
                 WEB_SERVER="${server}"
@@ -448,35 +407,24 @@ detect_web_server() {
         done
     fi
 
-    # No web server found
     if [[ "${WEB_SERVER}" == "unknown" ]] || [[ -z "${WEB_SERVER}" ]]; then
         log "ERROR" "No supported web server detected"
         log "INFO" "Please ensure Apache, Nginx, or LiteSpeed is installed and running"
         exit 1
     fi
 
-    # Detect web root
     detect_web_root
 
     log "SUCCESS" "Web server: ${WEB_SERVER} (User: ${WEB_USER}, Group: ${WEB_GROUP})"
 }
 
 detect_web_root() {
-    # Panel-specific roots
     case "${PANEL_TYPE}" in
         "directadmin")
-            if [[ -d "/var/www/html" ]]; then
-                WEB_ROOT="/var/www/html"
-            else
-                WEB_ROOT="/var/www/html"
-            fi
+            WEB_ROOT="/var/www/html"
             ;;
         "cpanel")
-            if [[ -d "/usr/local/apache/htdocs" ]]; then
-                WEB_ROOT="/usr/local/apache/htdocs"
-            else
-                WEB_ROOT="/usr/local/apache/htdocs"
-            fi
+            WEB_ROOT="/usr/local/apache/htdocs"
             ;;
         "plesk")
             if [[ -d "/var/www/vhosts/default/htdocs" ]]; then
@@ -488,23 +436,16 @@ detect_web_root() {
             fi
             ;;
         *)
-            # Server-specific roots
             case "${WEB_SERVER}" in
                 "nginx")
                     if [[ -d "/usr/share/nginx/html" ]]; then
                         WEB_ROOT="/usr/share/nginx/html"
-                    elif [[ -d "/var/www/html" ]]; then
-                        WEB_ROOT="/var/www/html"
                     else
                         WEB_ROOT="/var/www/html"
                     fi
                     ;;
                 "apache")
-                    if [[ -d "/var/www/html" ]]; then
-                        WEB_ROOT="/var/www/html"
-                    else
-                        WEB_ROOT="/var/www/html"
-                    fi
+                    WEB_ROOT="/var/www/html"
                     ;;
                 "litespeed"|"openlitespeed")
                     if [[ -d "/usr/local/lsws/htdocs" ]]; then
@@ -523,13 +464,11 @@ detect_web_root() {
             ;;
     esac
 
-    # Create web root if it doesn't exist
     if [[ ! -d "${WEB_ROOT}" ]]; then
         log "WARNING" "Creating web root: ${WEB_ROOT}"
         mkdir -p "${WEB_ROOT}"
     fi
 
-    # Create mrtg subdirectory
     WEB_MRTG_DIR="${WEB_ROOT}/mrtg"
     mkdir -p "${WEB_MRTG_DIR}"
 
@@ -537,24 +476,19 @@ detect_web_root() {
 }
 
 # =============================================================================
-# SERVICE DETECTION FUNCTIONS
+# SERVICE DETECTION
 # =============================================================================
 
 detect_rspamd() {
     log "INFO" "Checking for Rspamd email filter..."
 
     if command -v rspamd >/dev/null 2>&1; then
-        # Check if service is running
         if systemctl is-active --quiet rspamd 2>/dev/null || pgrep rspamd >/dev/null 2>&1; then
             HAS_RSPAMD=true
             log "SUCCESS" "Rspamd detected and running"
 
-            # =================================================================
-            # CRITICAL: Ensure web user can access Rspamd socket
-            # =================================================================
             if getent group rspamd >/dev/null 2>&1; then
                 usermod -aG rspamd "${WEB_USER}" >/dev/null 2>&1 || true
-                # Also add common service users
                 for user in snmp snmpd www-data apache nginx nobody; do
                     if id "${user}" >/dev/null 2>&1; then
                         usermod -aG rspamd "${user}" >/dev/null 2>&1 || true
@@ -575,7 +509,6 @@ detect_rspamd() {
 detect_mysql_socket() {
     MYSQL_SOCKET=""
 
-    # Method 1: Try mysql_config
     if command -v mysql_config >/dev/null 2>&1; then
         MYSQL_SOCKET=$(mysql_config --socket 2>/dev/null || true)
         if [[ -n "${MYSQL_SOCKET}" ]] && [[ -S "${MYSQL_SOCKET}" ]]; then
@@ -584,7 +517,6 @@ detect_mysql_socket() {
         fi
     fi
 
-    # Method 2: Check common socket locations
     local socket_locations=(
         "/var/lib/mysql/mysql.sock"
         "/tmp/mysql.sock"
@@ -603,11 +535,9 @@ detect_mysql_socket() {
         fi
     done
 
-    # Method 3: Try to extract from running process
     if pgrep mysqld >/dev/null 2>&1; then
         local pid=$(pgrep mysqld | head -1 || true)
         if [[ -n "${pid}" ]]; then
-            # Try to get socket from /proc
             MYSQL_SOCKET=$(ls -l /proc/${pid}/fd 2>/dev/null | grep socket | grep -o '/[^ ]*\.sock' | head -1 || true)
             if [[ -n "${MYSQL_SOCKET}" ]] && [[ -S "${MYSQL_SOCKET}" ]]; then
                 log "DEBUG" "Found MySQL socket from process: ${MYSQL_SOCKET}"
@@ -616,7 +546,6 @@ detect_mysql_socket() {
         fi
     fi
 
-    # Method 4: Try MySQL client with connection
     if command -v mysql >/dev/null 2>&1; then
         local test_socket=$(mysql -e "SHOW VARIABLES LIKE 'socket'" 2>/dev/null | grep socket | awk '{print $2}' || true)
         if [[ -n "${test_socket}" ]] && [[ -S "${test_socket}" ]]; then
@@ -635,14 +564,13 @@ detect_mysql() {
     log "INFO" "Checking for MySQL/MariaDB..."
 
     if command -v mysql >/dev/null 2>&1; then
-        # Check for running service
         if systemctl is-active --quiet mysql 2>/dev/null || \
            systemctl is-active --quiet mariadb 2>/dev/null || \
            pgrep mysqld >/dev/null 2>&1; then
 
             HAS_MYSQL=true
             log "SUCCESS" "MySQL/MariaDB detected"
-            detect_mysql_socket || true  # ignore return, we just want to set socket
+            detect_mysql_socket || true
         fi
     fi
 }
@@ -691,10 +619,8 @@ detect_dovecot() {
 detect_network_interfaces() {
     local interfaces=()
 
-    # Get all active network interfaces
     if ls /sys/class/net/ >/dev/null 2>&1; then
         while IFS= read -r interface; do
-            # Skip virtual interfaces
             if [[ ! "${interface}" =~ ^(lo|virbr|docker|veth|br-|tun|vnet) ]] && \
                ip link show "${interface}" 2>/dev/null | grep -q "UP"; then
                 interfaces+=("${interface}")
@@ -709,7 +635,6 @@ detect_network_interfaces() {
         done < <(ip link show 2>/dev/null || true)
     fi
 
-    # Fallback
     if [[ ${#interfaces[@]} -eq 0 ]]; then
         while IFS= read -r interface; do
             if [[ "${interface}" != "lo" ]]; then
@@ -722,14 +647,13 @@ detect_network_interfaces() {
 }
 
 # =============================================================================
-# ENHANCED MIB INSTALLATION
+# MIB INSTALLATION (Debian/Ubuntu)
 # =============================================================================
 install_snmp_mibs() {
     if [[ "${OS_ID}" == "debian" ]] || [[ "${OS_ID}" == "ubuntu" ]]; then
-        # Check if snmp-mibs-downloader is installed
         if ! dpkg -l | grep -q snmp-mibs-downloader; then
             log "INFO" "Installing SNMP MIBs (requires non-free repository)..."
-            # Enable non-free repository
+            # Enable non-free repository (works on Debian; adjust for Ubuntu if needed)
             sed -i '/^deb.*main/ s/$/ non-free/' /etc/apt/sources.list 2>/dev/null || true
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq snmp-mibs-downloader || log "WARNING" "Could not install snmp-mibs-downloader"
@@ -740,7 +664,7 @@ install_snmp_mibs() {
 }
 
 # =============================================================================
-# PRODUCTION-HARDENED INSTALLATION FUNCTIONS
+# INSTALLATION FUNCTIONS
 # =============================================================================
 
 install_dependencies() {
@@ -754,7 +678,6 @@ install_dependencies() {
     case "${OS_ID}" in
         ubuntu|debian)
             apt-get update -qq
-            # Install MIBs if possible
             install_snmp_mibs
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                 mrtg \
@@ -776,11 +699,9 @@ install_dependencies() {
                 --no-install-recommends || error_exit "Failed to install packages"
             ;;
         centos|rhel|almalinux|rocky|fedora)
-            # Enable EPEL if needed
             if [[ "${OS_ID}" != "fedora" ]] && ! rpm -q epel-release >/dev/null 2>&1; then
                 yum install -y -q epel-release || true
             fi
-            # Note: python3-json is not a package; json is part of python3-libs or python3.
             yum install -y -q \
                 mrtg \
                 net-snmp \
@@ -810,7 +731,6 @@ install_dependencies() {
             ;;
     esac
 
-    # Verify installations
     local missing=()
     for cmd in mrtg snmpd cfgmaker indexmaker python3; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then
@@ -825,13 +745,9 @@ install_dependencies() {
     fi
 }
 
-# =============================================================================
-# UPDATED configure_snmp function – Debian 12 compatible with IPv4/IPv6 auth
-# =============================================================================
 configure_snmp() {
     log "INFO" "Configuring SNMP..."
 
-    # Generate secure community if not set
     if [[ -z "${SNMP_COMMUNITY}" ]]; then
         if command -v openssl >/dev/null 2>&1; then
             SNMP_COMMUNITY="mrtg_$(openssl rand -hex 8)"
@@ -846,12 +762,10 @@ configure_snmp() {
         return 0
     fi
 
-    # Backup existing config
     if [[ -f /etc/snmp/snmpd.conf ]]; then
         cp /etc/snmp/snmpd.conf "/etc/snmp/snmpd.conf.backup.$(date +%Y%m%d-%H%M%S)" || true
     fi
 
-    # Create base SNMP configuration (Debian 12 friendly – explicit agentaddress)
     cat > /etc/snmp/snmpd.conf << EOF
 ########################################################################
 # SNMPd Configuration for MRTG
@@ -859,19 +773,14 @@ configure_snmp() {
 # Community: ${SNMP_COMMUNITY}
 ########################################################################
 
-# Explicitly bind to localhost only (both IPv4 and IPv6)
 agentaddress 127.0.0.1,[::1]
-
-# Read-only access with custom community for both IPv4 and IPv6
 rocommunity ${SNMP_COMMUNITY} 127.0.0.1
 rocommunity ${SNMP_COMMUNITY} ::1
 
-# System information
 syslocation "Production Server"
 syscontact ${DEFAULT_EMAIL}
 sysservices 0
 
-# Process monitoring
 proc  httpd 10 5
 proc  nginx 10 5
 proc  mysql 10 5
@@ -882,21 +791,15 @@ proc  redis 5 3
 proc  exim 10 5
 proc  dovecot 10 5
 
-# Disk monitoring
 includeAllDisks 10%
-
-# Load averages
 load 12 10 5
 
-# View definitions
 view   systemonly  included   .1.3.6.1.2.1.1
 view   systemonly  included   .1.3.6.1.2.1.2
 view   systemonly  included   .1.3.6.1.2.1.3
 
-# Access control
 access  MyROGroup   ""         any       noauth    exact   all    none   none
 
-# Disable default community
 com2sec paranoid default public
 group paranoid v1 paranoid
 group paranoid v2c paranoid
@@ -906,12 +809,10 @@ EOF
 
     chmod 600 /etc/snmp/snmpd.conf
 
-    # Debian 12 specific: unmask if needed
     if [[ "${OS_ID}" == "debian" ]] || [[ "${OS_ID}" == "ubuntu" ]]; then
         systemctl unmask snmpd >/dev/null 2>&1 || true
     fi
 
-    # Start SNMP service
     if systemctl list-units --full -all 2>/dev/null | grep -q 'snmpd.service'; then
         systemctl daemon-reload
         systemctl restart snmpd || {
@@ -924,11 +825,9 @@ EOF
         service snmpd restart || true
     fi
 
-    # CRITICAL: Wait for SNMP to fully initialize and bind to ports
     log "INFO" "Waiting 10 seconds for SNMP service to stabilize..."
     sleep 10
 
-    # Verify SNMP is working with retry logic
     local max_attempts=10
     local attempt=1
     while [[ $attempt -le $max_attempts ]]; do
@@ -952,7 +851,7 @@ EOF
 }
 
 # =============================================================================
-# UPDATED generate_mrtg_config function – with Debian MIB fix and robust community insertion
+# MRTG CONFIGURATION GENERATION
 # =============================================================================
 generate_mrtg_config() {
     log "INFO" "Generating MRTG configuration..."
@@ -967,18 +866,13 @@ generate_mrtg_config() {
         return 0
     fi
 
-    # =====================================================================
-    # DEBIAN 12 FIX: Comment out the line that disables MIBs
-    # =====================================================================
     if [[ -f /etc/snmp/snmp.conf ]]; then
         log "INFO" "Fixing Debian MIB configuration..."
         sed -i 's/^mibs :/#mibs :/' /etc/snmp/snmp.conf
     fi
 
-    # Ensure SNMP is ready
     sleep 2
 
-    # Try cfgmaker with retries - explicitly use 127.0.0.1 to avoid IPv6 issues
     local cfg_success=false
     for i in {1..3}; do
         log "INFO" "Attempt ${i} to detect interfaces..."
@@ -996,7 +890,6 @@ generate_mrtg_config() {
             "${SNMP_COMMUNITY}@127.0.0.1" > "${cfg_file}.tmp" 2>/dev/null; then
 
             if [[ -s "${cfg_file}.tmp" ]]; then
-                # Check if it actually contains interface data
                 if grep -q "Target\[" "${cfg_file}.tmp"; then
                     mv "${cfg_file}.tmp" "${cfg_file}"
                     cfg_success=true
@@ -1009,15 +902,12 @@ generate_mrtg_config() {
         sleep 2
     done
 
-    # Fallback to template
     if [[ "${cfg_success}" != true ]]; then
         log "WARNING" "cfgmaker failed - using template configuration"
         generate_template_config "${cfg_file}"
     fi
 
-    # =====================================================================
-    # Add System Monitoring – using the actual community string
-    # =====================================================================
+    # Append system monitoring targets (now using the correct community)
     cat >> "${cfg_file}" << EOF
 
 ########################################################################
@@ -1073,9 +963,6 @@ Options[processes]: growright, nopercent
 
 EOF
 
-    # =====================================================================
-    # RSPAMD MONITORING
-    # =====================================================================
     if [[ "${HAS_RSPAMD}" == true ]]; then
         log "INFO" "Adding Rspamd monitoring to configuration..."
 
@@ -1096,13 +983,9 @@ Options[rspamd]: growright, nopercent, gauge
 EOF
     fi
 
-    # =====================================================================
-    # MYSQL MONITORING (Socket-Aware with Thread Metrics)
-    # =====================================================================
     if [[ "${HAS_MYSQL}" == true ]]; then
         log "INFO" "Adding MySQL monitoring to configuration..."
 
-        # Build MySQL command with socket if available
         local mysql_cmd="mysql"
         local mysqladmin_cmd="mysqladmin"
         if [[ -n "${MYSQL_SOCKET}" ]]; then
@@ -1141,9 +1024,6 @@ Options[mysql_conns]: growright, nopercent, gauge
 EOF
     fi
 
-    # =====================================================================
-    # REDIS MONITORING
-    # =====================================================================
     if [[ "${HAS_REDIS}" == true ]]; then
         log "INFO" "Adding Redis monitoring to configuration..."
 
@@ -1164,9 +1044,6 @@ Options[redis]: growright, nopercent, gauge
 EOF
     fi
 
-    # =====================================================================
-    # EXIM MONITORING
-    # =====================================================================
     if [[ "${HAS_EXIM}" == true ]]; then
         log "INFO" "Adding Exim monitoring to configuration..."
 
@@ -1187,13 +1064,9 @@ Options[exim_queue]: growright, nopercent, gauge
 EOF
     fi
 
-    # =====================================================================
-    # DOVECOT MONITORING
-    # =====================================================================
     if [[ "${HAS_DOVECOT}" == true ]]; then
         log "INFO" "Adding Dovecot monitoring to configuration..."
 
-        # Check if doveadm is available
         if command -v doveadm >/dev/null 2>&1; then
             cat >> "${cfg_file}" << EOF
 
@@ -1247,16 +1120,13 @@ YSize[_]: 300
 
 EOF
 
-    # Add each interface – using the actual community string
     for interface in "${interfaces[@]}"; do
-        # Detect speed
-        local speed=1000000  # Default 1Gbps in bytes
+        local speed=1000000
         if [[ -f "/sys/class/net/${interface}/speed" ]]; then
             local detected=$(cat "/sys/class/net/${interface}/speed" 2>/dev/null | grep -o '[0-9]*' || echo "1000")
             speed=$((detected * 1000000 / 8))
         fi
 
-        # Get description
         local desc="${interface}"
         if command -v ethtool >/dev/null 2>&1; then
             desc=$(ethtool "${interface}" 2>/dev/null | grep "Description" | cut -d: -f2- | xargs || echo "${interface}")
@@ -1288,35 +1158,23 @@ configure_firewall() {
 
     local firewall_configured=false
 
-    # =====================================================================
-    # CSF (ConfigServer Firewall) - Common in DirectAdmin/cPanel
-    # SAFE HANDLING: Avoid double commas and syntax errors
-    # =====================================================================
     if [[ -f /etc/csf/csf.conf ]]; then
         log "INFO" "CSF firewall detected - applying safe configuration"
 
-        # Backup CSF config
         cp /etc/csf/csf.conf "/etc/csf/csf.conf.backup.$(date +%Y%m%d-%H%M%S)" || true
 
         local csf_modified=false
 
-        # Process UDP_IN and UDP_OUT safely
         for port_type in "UDP_IN" "UDP_OUT"; do
-            # Check if port 161 is already present
             if ! grep -q "161" /etc/csf/csf.conf; then
-                # Get current value safely
                 local current_line=$(grep "^${port_type} =" /etc/csf/csf.conf | head -1 || true)
                 local current=$(echo "${current_line}" | cut -d'"' -f2 || true)
 
-                # Case 1: Empty string - just set to "161"
                 if [[ -z "${current}" ]]; then
                     sed -i "s/^${port_type} = \"\"/${port_type} = \"161\"/" /etc/csf/csf.conf
                     log "INFO" "Set ${port_type} to \"161\""
                     csf_modified=true
-
-                # Case 2: Non-empty string - add to beginning with comma
                 else
-                    # Add to beginning to avoid trailing comma issues
                     sed -i "s/^${port_type} = \"${current}\"/${port_type} = \"161,${current}\"/" /etc/csf/csf.conf
                     log "INFO" "Added 161 to ${port_type}"
                     csf_modified=true
@@ -1324,7 +1182,6 @@ configure_firewall() {
             fi
         done
 
-        # Only restart CSF if changes were made
         if [[ "${csf_modified}" == true ]]; then
             csf -r >/dev/null 2>&1 || true
             log "SUCCESS" "CSF restarted with new rules"
@@ -1335,9 +1192,6 @@ configure_firewall() {
         firewall_configured=true
     fi
 
-    # =====================================================================
-    # Firewalld (RHEL/CentOS/Alma/Rocky)
-    # =====================================================================
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
         log "INFO" "Firewalld detected"
         if ! firewall-cmd --list-services --permanent | grep -q "snmp"; then
@@ -1350,9 +1204,6 @@ configure_firewall() {
         firewall_configured=true
     fi
 
-    # =====================================================================
-    # UFW (Ubuntu/Debian)
-    # =====================================================================
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
         log "INFO" "UFW detected"
         if ! ufw status | grep -q "161"; then
@@ -1364,9 +1215,6 @@ configure_firewall() {
         firewall_configured=true
     fi
 
-    # =====================================================================
-    # iptables (fallback)
-    # =====================================================================
     if [[ "${firewall_configured}" == false ]] && command -v iptables >/dev/null 2>&1; then
         log "INFO" "Configuring iptables"
 
@@ -1375,7 +1223,6 @@ configure_firewall() {
             iptables -A INPUT -p udp --dport 161 -m state --state NEW -j ACCEPT || true
             log "SUCCESS" "iptables rules added"
 
-            # Save rules
             if [[ -f /etc/redhat-release ]]; then
                 service iptables save >/dev/null 2>&1 || true
             elif [[ -f /etc/debian_version ]]; then
@@ -1390,10 +1237,6 @@ configure_firewall() {
     fi
 }
 
-# =============================================================================
-# FIXED create_directories function – ensures web directory is properly owned
-# with error handling for setfacl and all log calls have || true
-# =============================================================================
 create_directories() {
     log "INFO" "Creating directory structure..."
 
@@ -1422,23 +1265,18 @@ create_directories() {
         fi
     done
 
-    # CRITICAL: Ensure web directory exists with proper ownership
     log "INFO" "Setting up web directory: ${WEB_MRTG_DIR}"
 
-    # Create web directory if it doesn't exist
     if [[ ! -d "${WEB_MRTG_DIR}" ]]; then
         mkdir -p "${WEB_MRTG_DIR}" || log "WARNING" "Could not create web directory" || true
     fi
 
-    # Set proper ownership for web directory (DirectAdmin)
     if [[ "${PANEL_TYPE}" == "directadmin" ]] && id diradmin >/dev/null 2>&1; then
         log "INFO" "Setting DirectAdmin ownership on web directory"
         chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set ownership on web directory" || true
         chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on web directory" || true
 
-        # Set ACLs for DirectAdmin to read the files (non-fatal if fails)
         if command -v setfacl >/dev/null 2>&1; then
-            # Ensure directory exists before setfacl
             if [[ -d "${WEB_MRTG_DIR}" ]]; then
                 setfacl -R -m u:diradmin:rx "${WEB_MRTG_DIR}" 2>/dev/null || log "DEBUG" "setfacl command failed (ignored)" || true
                 log "DEBUG" "Attempted to set ACLs for diradmin on web directory"
@@ -1454,36 +1292,27 @@ create_directories() {
         chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set permissions on web directory" || true
     fi
 
-    # Set permissions on MRTG base directories
     if [[ "${DRY_RUN}" != true ]]; then
         log "INFO" "Setting directory permissions..."
 
-        # Set base permissions (non-critical) - all with || true to prevent script exit
         chmod 755 "${MRTG_BASE}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_BASE}" || true
         chmod 750 "${MRTG_CONF}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_CONF}" || true
         chmod 755 "${MRTG_LOG}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_LOG}" || true
         chmod 755 "${MRTG_HTML}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_HTML}" || true
         chmod 755 "${MRTG_SCRIPTS}" 2>/dev/null || log "WARNING" "Could not set permissions on ${MRTG_SCRIPTS}" || true
 
-        # =====================================================================
-        # CRITICAL FIX: Robust ownership assignment with || true at the end
-        # This prevents the error trap from triggering on chown failures
-        # =====================================================================
         if id "${WEB_USER}" >/dev/null 2>&1; then
             log "INFO" "Attempting to set ownership to ${WEB_USER} on MRTG base..."
 
-            # Try to set ownership on MRTG base directory - with || true at the end
             if chown -R "${WEB_USER}:${WEB_GROUP}" "${MRTG_BASE}" 2>/dev/null; then
                 log "SUCCESS" "Ownership set to ${WEB_USER}:${WEB_GROUP} for ${MRTG_BASE}"
             else
-                # Fallback: try just user without group
                 if chown -R "${WEB_USER}" "${MRTG_BASE}" 2>/dev/null; then
                     log "SUCCESS" "Ownership set to ${WEB_USER} (group skipped) for ${MRTG_BASE}"
                 else
                     log "WARNING" "Could not set ownership on ${MRTG_BASE} - continuing with root ownership"
                 fi
             fi
-            # Ensure we always continue regardless of chown results
             true
         else
             log "WARNING" "User ${WEB_USER} not found, directories will remain with current ownership"
@@ -1494,9 +1323,6 @@ create_directories() {
     return 0
 }
 
-# =============================================================================
-# ENHANCED: DirectAdmin Plugin Integration with error handling
-# =============================================================================
 setup_directadmin_plugin() {
     if [[ "${PANEL_TYPE}" != "directadmin" ]] || [[ "${DRY_RUN}" == true ]]; then
         return 0
@@ -1507,13 +1333,11 @@ setup_directadmin_plugin() {
     local da_plugins="/usr/local/directadmin/plugins"
     local mrtg_plugin="${da_plugins}/mrtg"
 
-    # Create plugin directory structure
     mkdir -p "${mrtg_plugin}/admin" 2>/dev/null || true
     mkdir -p "${mrtg_plugin}/data" 2>/dev/null || true
     mkdir -p "${mrtg_plugin}/hooks" 2>/dev/null || true
     mkdir -p "${mrtg_plugin}/images" 2>/dev/null || true
 
-    # Create plugin configuration file
     cat > "${mrtg_plugin}/plugin.conf" << EOF
 # DirectAdmin Plugin Configuration
 # Generated by MRTG Professional Suite v${SCRIPT_VERSION}
@@ -1530,12 +1354,10 @@ category=admin
 update_url=${REPO_URL}
 EOF
 
-    # Create simple icon (base64 encoded 1x1 transparent PNG)
     cat > "${mrtg_plugin}/images/mrtg_icon.png" << 'EOF'
 iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTsfm/wAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAH2SURBVDiNjZI9T9tQFIaf6+vYxIQECQhRNyhSpC5dmjIUqUtXJP6A/AJ26V/oxA9AomN3FrZ27MxWqRIDDEh8fM+xS0mI05E+0zvdc86rI0op/ie01uRyOQqFAq1Wi/PzcxRFUVVV5ubmaDab+L7P8PAw4+PjFAoF5ufnkVJyf3/P4eEhuVyO1dVVFhYWODw8ZGdnh1gsRiqVYnFxkXq9TqPRoNFo4DgOnU6HWCxGpVLBMAx838d1XUqlEpeXl+zv79NqtQjDkFwux9LSErOzs5yenlKpVEgkEjQaDWzbJp1Oo5RidHSUWCyGbdvkcjlarRaWZXF7e4vnebTbbdrtNvl8nqGhIaSUlMtlPM9jYmKCUqnE0dERjuMQRRGWZTE1NcXDwwMnJyek02l832d8fJzh4WFUVVEUheF4HIZh4DgOc3NzxONxXNel2WxSKBRoNpsUi0Vs26ZQKHB2doaUklgshlIKrTVaa6SUWJZFrVYjDENs2yaTyRBFEaOjo0RRRBRF+L7P6OgojuMQhiFaa4QQQoUQQgghhBAiBEEghBAiCIIwjmMhYowxQggBICJExBhjjDHGmBACEMYYI4QQQggBEEL8W1EUhRBCiP8uiiIhhBARQggRhqEQQkQIIUSE1loopYQQQkQppXAcB8dxSCaT+L6P1hrHcUgmk7iui1IKz/NIJpO4rovWmpubG6anp3l+fiYIAkZHR0kmk7iuS6vVYnJykvbLC+fn57TbbTzPY2hoiEKhQKvV4ubmhv8Ck0dn3scT1hQAAAAASUVORK5CYII=
 EOF
 
-    # Create admin index page with redirect
     cat > "${mrtg_plugin}/admin/index.html" << EOF
 <!DOCTYPE html>
 <html>
@@ -1550,7 +1372,6 @@ EOF
 </html>
 EOF
 
-    # Set proper ownership and permissions
     if id diradmin >/dev/null 2>&1; then
         chown -R diradmin:diradmin "${mrtg_plugin}" 2>/dev/null || true
         chmod 755 "${mrtg_plugin}" 2>/dev/null || true
@@ -1559,7 +1380,6 @@ EOF
         chmod 644 "${mrtg_plugin}/images/mrtg_icon.png" 2>/dev/null || true
     fi
 
-    # Grant diradmin access to MRTG web directory (non-fatal if fails)
     if [[ -d "${WEB_MRTG_DIR}" ]] && command -v setfacl >/dev/null 2>&1; then
         setfacl -R -m u:diradmin:rx "${WEB_MRTG_DIR}" 2>/dev/null || log "WARNING" "Could not set ACLs for diradmin" || true
         log "DEBUG" "Set ACLs for diradmin on web directory"
@@ -1567,7 +1387,6 @@ EOF
         log "DEBUG" "setfacl not available or directory missing, skipping ACL setup"
     fi
 
-    # Restart DirectAdmin to load plugin
     if command -v systemctl >/dev/null 2>&1; then
         systemctl restart directadmin 2>/dev/null || true
     elif command -v service >/dev/null 2>&1; then
@@ -1577,9 +1396,6 @@ EOF
     log "SUCCESS" "DirectAdmin plugin installed with native structure"
 }
 
-# =============================================================================
-# RSPAMD MONITORING SETUP (with timeout protection and robust JSON parsing)
-# =============================================================================
 setup_rspamd_monitoring() {
     if [[ "${HAS_RSPAMD}" != true ]] || [[ "${DRY_RUN}" == true ]]; then
         return 0
@@ -1587,17 +1403,11 @@ setup_rspamd_monitoring() {
 
     log "INFO" "Setting up Rspamd monitoring helpers with timeout protection..."
 
-    # Create the Rspamd stats helper script with robust JSON parsing
     cat > "${MRTG_SCRIPTS}/get_rspamd_stats.sh" << 'EOF'
 #!/bin/bash
-# Rspamd Statistics Collector for MRTG v2.2.9
-# Handles timeouts, permissions, and malformed JSON gracefully
-
-# Query with 2-second timeout to prevent hanging
+# Rspamd Statistics Collector for MRTG v2.3.0
 STATS=$(timeout 2 rspamc -j stat 2>/dev/null)
-
 if [[ $? -eq 0 ]] && [[ -n "$STATS" ]]; then
-    # Parse JSON with fallback to zeros on any error
     python3 -c "
 import sys, json
 try:
@@ -1611,13 +1421,10 @@ except:
     print('0')
 " <<< "$STATS" 2>/dev/null || echo -e "0\n0"
 else
-    # Check if rspamd socket exists but we can't connect
     if [[ -S /var/run/rspamd/rspamd.sock ]] || [[ -S /tmp/rspamd.sock ]]; then
-        # Socket exists but connection failed - likely permission issue
         echo "0"
         echo "0"
     else
-        # No socket at all - rspamd probably not running
         echo "0"
         echo "0"
     fi
@@ -1626,15 +1433,11 @@ EOF
 
     chmod 755 "${MRTG_SCRIPTS}/get_rspamd_stats.sh"
 
-    # =====================================================================
-    # CRITICAL: Fix Rspamd socket permissions
-    # =====================================================================
     if [[ -d /var/run/rspamd ]]; then
         chmod 755 /var/run/rspamd 2>/dev/null || true
         chown -R rspamd:rspamd /var/run/rspamd 2>/dev/null || true
     fi
 
-    # For systemd systems, create drop-in for socket permissions
     if command -v systemctl >/dev/null 2>&1 && [[ -f /etc/systemd/system/rspamd.service ]]; then
         mkdir -p /etc/systemd/system/rspamd.service.d 2>/dev/null || true
         cat > /etc/systemd/system/rspamd.service.d/override.conf << EOF
@@ -1649,9 +1452,6 @@ EOF
     log "SUCCESS" "Rspamd monitoring helpers installed with timeout protection"
 }
 
-# =============================================================================
-# CRITICAL: LOGROTATE CONFIGURATION
-# =============================================================================
 setup_logrotate() {
     log "INFO" "Configuring log rotation for MRTG logs..."
 
@@ -1670,7 +1470,6 @@ ${MRTG_LOG}/*.log {
     create 0644 root root
     sharedscripts
     postrotate
-        # Restart MRTG if needed (though it's cron-based)
         [ -f /var/run/mrtg_cron.lock ] && rm -f /var/run/mrtg_cron.lock
     endscript
 }
@@ -1679,9 +1478,6 @@ EOF
     log "SUCCESS" "Logrotate configured for MRTG logs"
 }
 
-# =============================================================================
-# CRITICAL: CRON SETUP WITH LOCKFILE TO PREVENT RACE CONDITIONS
-# =============================================================================
 setup_cron() {
     log "INFO" "Setting up cron with lockfile protection (interval: ${INTERVAL} minutes)..."
 
@@ -1690,13 +1486,9 @@ setup_cron() {
         return 0
     fi
 
-    # Create runner script with lockfile to prevent overlapping executions
-    # Using unquoted EOF to allow variables to expand during installation
-    # All runner-specific variables are escaped with backslash
     cat > "${MRTG_BIN}/run-mrtg.sh" << EOF
 #!/bin/bash
-# MRTG Runner - Generated by MRTG Professional Suite v2.2.9
-# Includes lockfile to prevent race conditions on high-traffic servers
+# MRTG Runner - Generated by MRTG Professional Suite v2.3.0
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LANG=en_US.UTF-8
@@ -1715,7 +1507,6 @@ log_message() {
     echo "\$(date '+%Y-%m-%d %H:%M:%S') - \$1" >> "\${LOGFILE}"
 }
 
-# Function to check if process is really running
 is_process_running() {
     local pid=\$1
     if [[ -d "/proc/\${pid}" ]] && kill -0 "\${pid}" 2>/dev/null; then
@@ -1724,7 +1515,6 @@ is_process_running() {
     return 1
 }
 
-# Check if another instance is running
 if [[ -f "\${LOCKFILE}" ]]; then
     pid=\$(cat "\${LOCKFILE}" 2>/dev/null || true)
     if [[ -n "\${pid}" ]] && is_process_running "\${pid}"; then
@@ -1736,13 +1526,11 @@ if [[ -f "\${LOCKFILE}" ]]; then
     fi
 fi
 
-# Create lockfile with current PID
 echo \$$ > "\${LOCKFILE}"
 trap 'rm -f "\${LOCKFILE}"' EXIT
 
 log_message "Starting MRTG run (with nice/ionice for low priority)"
 
-# Run MRTG (3 passes for rate calculation) with low CPU priority
 for i in {1..3}; do
     log_message "MRTG pass \$i/3"
     nice -n 19 ionice -c 3 /usr/bin/mrtg "\${MRTG_CONF}/mrtg.cfg" --logging "\${MRTG_LOG}/mrtg.log" 2>&1 | while read line; do
@@ -1751,18 +1539,15 @@ for i in {1..3}; do
     sleep 1
 done
 
-# Generate index
 log_message "Generating index"
 nice -n 19 /usr/bin/indexmaker "\${MRTG_CONF}/mrtg.cfg" --output="\${WEB_DIR}/index.html"
 
-# Verify index was generated correctly
 if [[ -f "\${WEB_DIR}/index.html" ]] && grep -q "MRTG" "\${WEB_DIR}/index.html" 2>/dev/null; then
     log_message "Index page verified"
 else
     log_message "WARNING: Index page may be incomplete"
 fi
 
-# Set permissions
 chown -R "\${WEB_USER}:\${WEB_GROUP}" "\${WEB_DIR}" 2>/dev/null || true
 chmod -R 755 "\${WEB_DIR}" 2>/dev/null || true
 
@@ -1771,19 +1556,14 @@ EOF
 
     chmod +x "${MRTG_BIN}/run-mrtg.sh"
 
-    # Remove old cron entries
     crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab - || true
 
-    # Add new cron
     (crontab -l 2>/dev/null || true; echo "# MRTG Monitoring - Added by MRTG Professional Suite v${SCRIPT_VERSION}") | crontab - || true
     (crontab -l 2>/dev/null; echo "*/${INTERVAL} * * * * ${MRTG_BIN}/run-mrtg.sh >/dev/null 2>&1") | crontab - || true
 
     log "SUCCESS" "Cron installed with lockfile protection and low CPU priority"
 }
 
-# =============================================================================
-# ENHANCED setup_web_access function – with proper Apache configuration
-# =============================================================================
 setup_web_access() {
     log "INFO" "Configuring web access..."
 
@@ -1792,29 +1572,22 @@ setup_web_access() {
         return 0
     fi
 
-    # Create symbolic link
     if [[ "${WEB_MRTG_DIR}" != "${MRTG_HTML}" ]]; then
         ln -sfn "${WEB_MRTG_DIR}" "${MRTG_HTML}" 2>/dev/null || true
     fi
 
-    # Create .htaccess for Apache/LiteSpeed with proper permissions
     if [[ "${WEB_SERVER}" == "apache" ]] || [[ "${WEB_SERVER}" == "litespeed" ]] || [[ "${WEB_SERVER}" == "openlitespeed" ]]; then
         cat > "${WEB_MRTG_DIR}/.htaccess" << EOF
 # MRTG Access Control
 # Generated: $(date)
 
-# Allow access to MRTG directory
 Require all granted
-
-# Allow directory listing
 Options +Indexes
 
-# Protect sensitive files
 <FilesMatch "\.(conf|log|sh|pl|cgi)$">
     Require all denied
 </FilesMatch>
 
-# Allow images and HTML
 <FilesMatch "\.(png|gif|jpg|jpeg|html|htm|css|js)$">
     Require all granted
 </FilesMatch>
@@ -1822,81 +1595,47 @@ EOF
         chmod 644 "${WEB_MRTG_DIR}/.htaccess" 2>/dev/null || true
     fi
 
-    # Create robots.txt
     cat > "${WEB_MRTG_DIR}/robots.txt" << EOF
 User-agent: *
 Disallow: /
 EOF
     chmod 644 "${WEB_MRTG_DIR}/robots.txt" 2>/dev/null || true
 
-    # =====================================================================
-    # ENHANCED: Apache alias and directory configuration
-    # =====================================================================
     if [[ "${WEB_SERVER}" == "apache" ]]; then
         if [[ -d /etc/apache2/conf-available ]]; then
-            # Debian/Ubuntu
             cat > /etc/apache2/conf-available/mrtg.conf << EOF
-# MRTG Apache Configuration
-# Generated by MRTG Professional Suite v${SCRIPT_VERSION}
-
 Alias /mrtg ${WEB_MRTG_DIR}
-
 <Directory ${WEB_MRTG_DIR}>
     Options +Indexes +FollowSymLinks +MultiViews
     AllowOverride All
     Require all granted
-
-    # Allow access from localhost only for security
-    # <RequireAny>
-    #     Require ip 127.0.0.1
-    #     Require ip ::1
-    # </RequireAny>
 </Directory>
-
-# Custom error page for MRTG
 ErrorDocument 403 /mrtg/index.html
 EOF
             a2enconf mrtg >/dev/null 2>&1 || true
             log "SUCCESS" "Apache configuration created for /mrtg"
 
         elif [[ -d /etc/httpd/conf.d ]]; then
-            # RHEL/CentOS
             cat > /etc/httpd/conf.d/mrtg.conf << EOF
-# MRTG Apache Configuration
-# Generated by MRTG Professional Suite v${SCRIPT_VERSION}
-
 Alias /mrtg ${WEB_MRTG_DIR}
-
 <Directory ${WEB_MRTG_DIR}>
     Options +Indexes +FollowSymLinks +MultiViews
     AllowOverride All
     Require all granted
-
-    # Allow access from localhost only for security
-    # <RequireAny>
-    #     Require ip 127.0.0.1
-    #     Require ip ::1
-    # </RequireAny>
 </Directory>
-
-# Custom error page for MRTG
 ErrorDocument 403 /mrtg/index.html
 EOF
             log "SUCCESS" "Apache configuration created for /mrtg"
         fi
 
-        # Set proper permissions on web directory
         chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
         chmod 644 "${WEB_MRTG_DIR}"/* 2>/dev/null || true
 
-        # Ensure Apache can read the files (non-fatal if fails)
         if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
-            # For DirectAdmin, ensure Apache user can read
             if id www-data >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
                 setfacl -R -m u:www-data:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
             fi
         else
-            # For standard Apache, ensure proper ownership
             if id www-data >/dev/null 2>&1; then
                 chown -R www-data:www-data "${WEB_MRTG_DIR}" 2>/dev/null || true
             elif id apache >/dev/null 2>&1; then
@@ -1904,30 +1643,21 @@ EOF
             fi
         fi
 
-        # Reload Apache to apply changes
         if command -v systemctl >/dev/null 2>&1; then
             systemctl reload apache2 2>/dev/null || systemctl reload httpd 2>/dev/null || true
         fi
     fi
 
-    # =====================================================================
-    # DirectAdmin Permission Persistence
-    # =====================================================================
     if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
         log "INFO" "Setting DirectAdmin-specific permissions"
 
-        # Ensure diradmin owns everything
         if id diradmin >/dev/null 2>&1; then
             chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
         fi
 
-        # Set 755 on directory so web server can read
         chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
-
-        # Set 644 on files
         find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
 
-        # Set ACLs for web server user (non-fatal if fails)
         if command -v setfacl >/dev/null 2>&1; then
             if id www-data >/dev/null 2>&1; then
                 setfacl -R -m u:www-data:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
@@ -1940,7 +1670,6 @@ EOF
         log "SUCCESS" "DirectAdmin permissions set"
     fi
 
-    # Create a test index.html if it doesn't exist
     if [[ ! -f "${WEB_MRTG_DIR}/index.html" ]]; then
         cat > "${WEB_MRTG_DIR}/index.html" << EOF
 <!DOCTYPE html>
@@ -1976,10 +1705,83 @@ EOF
     log "SUCCESS" "Web access configured"
 }
 
-# =============================================================================
-# ENHANCED HEALTH CHECK FUNCTIONS
-# =============================================================================
+configure_panel_integration() {
+    if [[ "${PANEL_TYPE}" == "none" ]] || [[ "${DRY_RUN}" == true ]]; then
+        return 0
+    fi
 
+    log "INFO" "Configuring ${PANEL_TYPE} integration..."
+
+    case "${PANEL_TYPE}" in
+        "directadmin")
+            setup_directadmin_plugin
+            ;;
+        "cpanel")
+            if [[ -d "/usr/local/apache/htdocs" ]]; then
+                ln -sfn "${WEB_MRTG_DIR}" "/usr/local/apache/htdocs/mrtg" 2>/dev/null || true
+                log "SUCCESS" "cPanel integration configured"
+            fi
+            ;;
+        "plesk")
+            if [[ -d "/var/www/vhosts/default/htdocs" ]]; then
+                ln -sfn "${WEB_MRTG_DIR}" "/var/www/vhosts/default/htdocs/mrtg" 2>/dev/null || true
+                log "SUCCESS" "Plesk integration configured"
+            fi
+            ;;
+    esac
+}
+
+# =============================================================================
+# WARMUP AND INITIALIZATION
+# =============================================================================
+initialize_mrtg() {
+    log "INFO" "Initializing MRTG data collection (3-pass warmup)..."
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "INFO" "Would run MRTG 3 times to seed data"
+        return 0
+    fi
+
+    local mrtg_path=$(command -v mrtg || echo "/usr/bin/mrtg")
+    local cfg_file="${MRTG_CONF}/mrtg.cfg"
+
+    mkdir -p "${MRTG_LOG}" "${WEB_MRTG_DIR}"
+
+    for i in {1..3}; do
+        log "INFO" "Warmup pass ${i}/3..."
+        if ! env LANG=C ${mrtg_path} "${cfg_file}" --logging "${MRTG_LOG}/mrtg.log" >/dev/null 2>&1; then
+            log "INFO" "Pass ${i} completed (expected warnings ignored)"
+        fi
+        sleep 2
+    done
+
+    log "INFO" "Generating index page..."
+    local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
+    ${indexmaker_path} "${cfg_file}" --output="${WEB_MRTG_DIR}/index.html" 2>/dev/null || true
+
+    if [[ -f "${WEB_MRTG_DIR}/index.html" ]] && grep -q "MRTG" "${WEB_MRTG_DIR}/index.html" 2>/dev/null; then
+        log "SUCCESS" "Index page verified - contains MRTG content"
+    else
+        log "WARNING" "Index page may be incomplete - check configuration"
+    fi
+
+    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
+        if id diradmin >/dev/null 2>&1; then
+            chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
+        fi
+        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
+    else
+        chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
+        chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+    fi
+
+    log "SUCCESS" "Initialization complete - MRTG data seeded"
+}
+
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
 verify_system_health() {
     log "INFO" "Running comprehensive health check..."
 
@@ -1990,7 +1792,6 @@ verify_system_health() {
     echo -e "${BOLD}              MRTG SYSTEM HEALTH DIAGNOSTIC${NC}"
     echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}\n"
 
-    # 1. Installation Check
     echo -e "${BOLD}1. Installation${NC}"
     if [[ -d "${MRTG_BASE}" ]]; then
         echo -e "  ${GREEN}✓${NC} MRTG base directory: ${MRTG_BASE}"
@@ -2006,7 +1807,6 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # 2. SNMP Service
     echo -e "\n${BOLD}2. SNMP Service${NC}"
     if systemctl is-active --quiet snmpd 2>/dev/null || service snmpd status 2>/dev/null | grep -q "running"; then
         echo -e "  ${GREEN}✓${NC} SNMP service running"
@@ -2015,7 +1815,6 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # Test SNMP with multiple attempts
     local snmp_ok=false
     if command -v snmpget >/dev/null 2>&1; then
         for attempt in {1..3}; do
@@ -2035,13 +1834,9 @@ verify_system_health() {
         fi
     fi
 
-    # 3. Cron with Lockfile
     echo -e "\n${BOLD}3. Scheduled Tasks${NC}"
     if crontab -l 2>/dev/null | grep -q "run-mrtg.sh"; then
-        local cron_line=$(crontab -l 2>/dev/null | grep "run-mrtg.sh" | head -1 | awk '{$1=$2=$3=$4=$5=""; print $0}' | xargs)
         echo -e "  ${GREEN}✓${NC} Cron job active with lockfile protection"
-
-        # Check if lockfile mechanism is working
         if [[ -f "/tmp/mrtg_cron.lock" ]]; then
             local lock_pid=$(cat "/tmp/mrtg_cron.lock" 2>/dev/null || true)
             if [[ -n "${lock_pid}" ]] && kill -0 "${lock_pid}" 2>/dev/null; then
@@ -2053,7 +1848,6 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # 4. Logrotate Configuration
     echo -e "\n${BOLD}4. Log Maintenance${NC}"
     if [[ -f /etc/logrotate.d/mrtg ]]; then
         echo -e "  ${GREEN}✓${NC} Logrotate configured for MRTG logs"
@@ -2062,7 +1856,6 @@ verify_system_health() {
         ((warnings++))
     fi
 
-    # 5. Data Collection
     echo -e "\n${BOLD}5. Data Collection${NC}"
     if [[ -f "${MRTG_LOG}/mrtg.log" ]]; then
         local log_size=$(stat -c%s "${MRTG_LOG}/mrtg.log" 2>/dev/null || stat -f%z "${MRTG_LOG}/mrtg.log" 2>/dev/null || echo "0")
@@ -2088,39 +1881,9 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # 6. Web Interface
     echo -e "\n${BOLD}6. Web Interface${NC}"
     if [[ -d "${WEB_MRTG_DIR}" ]]; then
         echo -e "  ${GREEN}✓${NC} Web directory exists"
-
-        # Check web directory permissions
-        if [[ -r "${WEB_MRTG_DIR}" ]]; then
-            echo -e "  ${GREEN}✓${NC} Web directory is readable"
-        else
-            echo -e "  ${RED}✗${NC} Web directory not readable"
-            ((errors++))
-        fi
-
-        # Check if Apache config exists
-        if [[ -f /etc/apache2/conf-available/mrtg.conf ]] || [[ -f /etc/httpd/conf.d/mrtg.conf ]]; then
-            echo -e "  ${GREEN}✓${NC} Apache configuration found"
-        else
-            echo -e "  ${YELLOW}⚠${NC} Apache configuration not found - may need manual setup"
-            ((warnings++))
-        fi
-
-        # Test web access with curl
-        if command -v curl >/dev/null 2>&1; then
-            if curl -s -I "http://localhost/mrtg/" 2>/dev/null | grep -q "200 OK"; then
-                echo -e "  ${GREEN}✓${NC} Web interface accessible"
-            elif curl -s -I "http://localhost/mrtg/" 2>/dev/null | grep -q "403"; then
-                echo -e "  ${YELLOW}⚠${NC} Web interface returns 403 Forbidden - check Apache permissions"
-                ((warnings++))
-            else
-                echo -e "  ${YELLOW}⚠${NC} Web interface not accessible - check Apache configuration"
-                ((warnings++))
-            fi
-        fi
 
         local image_count=$(find "${WEB_MRTG_DIR}" -name "*.png" 2>/dev/null | wc -l || echo "0")
         if [[ ${image_count} -gt 0 ]]; then
@@ -2132,8 +1895,6 @@ verify_system_health() {
 
         if [[ -f "${WEB_MRTG_DIR}/index.html" ]]; then
             echo -e "  ${GREEN}✓${NC} Index page exists"
-
-            # Verify index content
             if grep -q "MRTG" "${WEB_MRTG_DIR}/index.html" 2>/dev/null; then
                 echo -e "  ${GREEN}✓${NC} Index page contains valid MRTG content"
             else
@@ -2149,7 +1910,6 @@ verify_system_health() {
         ((errors++))
     fi
 
-    # 7. Network Interfaces
     echo -e "\n${BOLD}7. Network Interfaces${NC}"
     local interfaces=($(detect_network_interfaces))
     echo -e "  ${GREEN}✓${NC} Detected ${#interfaces[@]} active interfaces"
@@ -2161,73 +1921,7 @@ verify_system_health() {
     done
     echo -e "  ${GREEN}✓${NC} Monitoring ${monitored} interfaces"
 
-    # 8. Rspamd Check
-    if [[ "${HAS_RSPAMD}" == true ]]; then
-        echo -e "\n${BOLD}8. Rspamd Email Filter${NC}"
-        if systemctl is-active --quiet rspamd 2>/dev/null || pgrep rspamd >/dev/null; then
-            echo -e "  ${GREEN}✓${NC} Rspamd service running"
-
-            # Test Rspamd stats collection with timeout
-            if [[ -x "${MRTG_SCRIPTS}/get_rspamd_stats.sh" ]]; then
-                local rspamd_test=$(timeout 3 "${MRTG_SCRIPTS}/get_rspamd_stats.sh" 2>/dev/null)
-                if [[ -n "${rspamd_test}" ]] && echo "${rspamd_test}" | grep -q '^[0-9]\+'; then
-                    echo -e "  ${GREEN}✓${NC} Rspamd stats collecting (timeout-protected)"
-
-                    # Check if user is in rspamd group
-                    if id "${WEB_USER}" 2>/dev/null | grep -q rspamd; then
-                        echo -e "  ${GREEN}✓${NC} ${WEB_USER} has rspamd group access"
-                    fi
-                else
-                    echo -e "  ${YELLOW}⚠${NC} Rspamd stats unavailable - check socket permissions"
-                    ((warnings++))
-                fi
-            fi
-        else
-            echo -e "  ${YELLOW}⚠${NC} Rspamd installed but not running"
-            ((warnings++))
-        fi
-    fi
-
-    # 9. MySQL Socket and Thread Check
-    if [[ "${HAS_MYSQL}" == true ]]; then
-        echo -e "\n${BOLD}9. MySQL/MariaDB${NC}"
-        if detect_mysql_socket; then
-            echo -e "  ${GREEN}✓${NC} MySQL socket found: ${MYSQL_SOCKET}"
-
-            # Test thread monitoring
-            local mysqladmin_cmd="mysqladmin"
-            if [[ -n "${MYSQL_SOCKET}" ]]; then
-                mysqladmin_cmd="mysqladmin --socket=${MYSQL_SOCKET}"
-            fi
-
-            if ${mysqladmin_cmd} status >/dev/null 2>&1; then
-                echo -e "  ${GREEN}✓${NC} Thread monitoring available"
-            else
-                echo -e "  ${YELLOW}⚠${NC} Thread monitoring may be limited"
-            fi
-        else
-            echo -e "  ${YELLOW}⚠${NC} MySQL detected but no socket found - using TCP"
-            ((warnings++))
-        fi
-    fi
-
-    # 10. Service Status Summary
-    echo -e "\n${BOLD}10. Monitored Services${NC}"
-    local services=()
-    [[ "${HAS_RSPAMD}" == true ]] && services+=("Rspamd")
-    [[ "${HAS_MYSQL}" == true ]] && services+=("MySQL")
-    [[ "${HAS_REDIS}" == true ]] && services+=("Redis")
-    [[ "${HAS_EXIM}" == true ]] && services+=("Exim")
-    [[ "${HAS_DOVECOT}" == true ]] && services+=("Dovecot")
-
-    if [[ ${#services[@]} -gt 0 ]]; then
-        echo -e "  ${GREEN}✓${NC} Monitoring: ${services[*]}"
-    else
-        echo -e "  ${YELLOW}○${NC} No additional services detected"
-    fi
-
-    # 11. Firewall Status
-    echo -e "\n${BOLD}11. Firewall Configuration${NC}"
+    echo -e "\n${BOLD}8. Firewall Configuration${NC}"
     if [[ -f /etc/csf/csf.conf ]]; then
         if grep -q "161" /etc/csf/csf.conf; then
             echo -e "  ${GREEN}✓${NC} CSF allows SNMP (port 161)"
@@ -2237,7 +1931,6 @@ verify_system_health() {
         fi
     fi
 
-    # Summary
     echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
     echo -e "${BOLD}SUMMARY${NC}"
     echo -e "  Errors: ${errors}   Warnings: ${warnings}"
@@ -2256,6 +1949,9 @@ verify_system_health() {
     return ${errors}
 }
 
+# =============================================================================
+# REPAIR INSTALLATION – FIXED OS_ID and added PNG cleanup
+# =============================================================================
 repair_installation() {
     log "INFO" "Starting repair process..."
 
@@ -2264,14 +1960,14 @@ repair_installation() {
         return 0
     fi
 
-    # Backup first
+    # First, detect OS to set OS_ID (fix for unbound variable)
+    detect_os
+
     backup_config
 
-    # Reconfigure SNMP (this will ensure community string is set)
     log "INFO" "Reconfiguring SNMP..."
     configure_snmp
 
-    # Fix web directory permissions
     log "INFO" "Fixing web directory permissions..."
     if [[ "${PANEL_TYPE}" == "directadmin" ]] && id diradmin >/dev/null 2>&1; then
         mkdir -p "${WEB_MRTG_DIR}" 2>/dev/null || true
@@ -2280,37 +1976,38 @@ repair_installation() {
         log "SUCCESS" "Web directory permissions fixed for DirectAdmin"
     fi
 
-    # Fix Apache configuration
     log "INFO" "Fixing Apache configuration..."
     setup_web_access
 
-    # Fix DirectAdmin plugin
     if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
         setup_directadmin_plugin
     fi
 
-    # Fix Rspamd permissions if needed
     if [[ "${HAS_RSPAMD}" == true ]]; then
         setup_rspamd_monitoring
     fi
 
-    # Regenerate config (will now use correct community)
     generate_mrtg_config
 
-    # Reinitialize with warmup
+    # ------------------------------------------------------------
+    # NEW: Remove old PNG files to force regeneration
+    # (as recommended in MRTG FAQ [citation:1][citation:6])
+    # ------------------------------------------------------------
+    log "INFO" "Removing old graph images to force fresh data..."
+    rm -f "${WEB_MRTG_DIR}"/*-day.png "${WEB_MRTG_DIR}"/*-week.png \
+          "${WEB_MRTG_DIR}"/*-month.png "${WEB_MRTG_DIR}"/*-year.png \
+          "${WEB_MRTG_DIR}"/*.png 2>/dev/null || true
+
     initialize_mrtg
 
-    # Fix cron if missing
     if ! crontab -l 2>/dev/null | grep -q "run-mrtg.sh"; then
         setup_cron
     fi
 
-    # Fix logrotate if missing
     if [[ ! -f /etc/logrotate.d/mrtg ]]; then
         setup_logrotate
     fi
 
-    # Fix permissions
     if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
         if id diradmin >/dev/null 2>&1; then
             chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
@@ -2318,7 +2015,6 @@ repair_installation() {
         chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
         find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
 
-        # Set ACLs for web server (non-fatal if fails)
         if command -v setfacl >/dev/null 2>&1; then
             if id www-data >/dev/null 2>&1; then
                 setfacl -R -m u:www-data:rx "${WEB_MRTG_DIR}" 2>/dev/null || true
@@ -2334,13 +2030,12 @@ repair_installation() {
 
     log "SUCCESS" "Repair completed"
 
-    verify_system_health || true  # Don't exit even if health check finds issues
+    verify_system_health || true
 }
 
 # =============================================================================
-# BACKUP FUNCTIONS
+# BACKUP / RESTORE / UNINSTALL (unchanged from v2.2.9, but included for completeness)
 # =============================================================================
-
 backup_config() {
     local backup_file="${BACKUP_DIR}/mrtg-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
 
@@ -2353,7 +2048,6 @@ backup_config() {
 
     mkdir -p "${BACKUP_DIR}" 2>/dev/null || true
 
-    # Backup configuration
     tar -czf "${backup_file}" \
         --exclude="${MRTG_LOG}/*" \
         --exclude="${MRTG_VAR}/*" \
@@ -2363,7 +2057,6 @@ backup_config() {
         /etc/snmp/snmpd.conf \
         2>/dev/null || true
 
-    # Save info
     cat > "${BACKUP_DIR}/install-info.txt" << EOF
 MRTG Backup
 Date: $(date)
@@ -2413,101 +2106,114 @@ restore_config() {
     if confirm_action "Restore from $(basename "${selected}")? This will overwrite current configuration."; then
         log "INFO" "Restoring from: ${selected}"
 
-        # Backup current
         backup_config
 
-        # Stop cron
         crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | crontab - || true
 
-        # Restore
         tar -xzf "${selected}" -C / 2>/dev/null || true
 
-        # Restart services
         systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
         sleep 5
 
-        # Re-add cron
         setup_cron
 
-        # Reinitialize
         initialize_mrtg
 
         log "SUCCESS" "Restore completed"
     fi
 }
 
-# =============================================================================
-# CRITICAL: 3-PASS WARMUP FUNCTION WITH VALIDATION
-# =============================================================================
-initialize_mrtg() {
-    log "INFO" "Initializing MRTG data collection (3-pass warmup)..."
+uninstall_mrtg() {
+    log "INFO" "Starting uninstall..."
 
     if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would run MRTG 3 times to seed data"
+        log "INFO" "Would perform uninstall"
         return 0
     fi
 
-    local mrtg_path=$(command -v mrtg || echo "/usr/bin/mrtg")
-    local cfg_file="${MRTG_CONF}/mrtg.cfg"
+    # Set defaults for uninstall
+    WEB_MRTG_DIR="${WEB_MRTG_DIR:-/var/www/html/mrtg}"
+    WEB_USER="${WEB_USER:-diradmin}"
+    WEB_GROUP="${WEB_GROUP:-diradmin}"
+    PANEL_TYPE="${PANEL_TYPE:-directadmin}"
+    OS_ID="${OS_ID:-debian}"
 
-    # Ensure directories exist
-    mkdir -p "${MRTG_LOG}" "${WEB_MRTG_DIR}"
+    if [[ "${FORCE_MODE}" != true ]]; then
+        echo -e "${RED}${BOLD}WARNING: This will remove MRTG and all configurations${NC}"
+        echo -e "Affected:"
+        echo -e "  - ${MRTG_BASE}"
+        echo -e "  - ${WEB_MRTG_DIR}"
+        echo -e "  - /etc/snmp/snmpd.conf"
+        echo -e "  - MRTG cron jobs"
+        echo -e "  - DirectAdmin plugin (if installed)"
+        echo -e "  - Logrotate configuration"
+        echo -e "  - Apache MRTG configuration"
+        echo ""
 
-    # =====================================================================
-    # CRITICAL: 3-pass warmup loop
-    # First run creates .log files (may error)
-    # Second run creates .old files (may error)
-    # Third run calculates rates (should succeed)
-    # =====================================================================
-    for i in {1..3}; do
-        log "INFO" "Warmup pass ${i}/3..."
-
-        # Run MRTG and ignore errors (they're expected during warmup)
-        if ! env LANG=C ${mrtg_path} "${cfg_file}" --logging "${MRTG_LOG}/mrtg.log" >/dev/null 2>&1; then
-            log "INFO" "Pass ${i} completed (expected warnings ignored)"
+        if ! confirm_action "Continue with uninstall?"; then
+            log "INFO" "Uninstall cancelled"
+            return 0
         fi
-
-        # Small delay between runs
-        sleep 2
-    done
-
-    # Generate index page
-    log "INFO" "Generating index page..."
-    local indexmaker_path=$(command -v indexmaker || echo "/usr/bin/indexmaker")
-    ${indexmaker_path} "${cfg_file}" --output="${WEB_MRTG_DIR}/index.html" 2>/dev/null || true
-
-    # =====================================================================
-    # CRITICAL: Verify index page was generated correctly
-    # FIXED: Looking for "MRTG" not "MRTG Index Page"
-    # =====================================================================
-    if [[ -f "${WEB_MRTG_DIR}/index.html" ]] && grep -q "MRTG" "${WEB_MRTG_DIR}/index.html" 2>/dev/null; then
-        log "SUCCESS" "Index page verified - contains MRTG content"
-    else
-        log "WARNING" "Index page may be incomplete - check configuration"
     fi
 
-    # Set permissions
-    if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
-        if id diradmin >/dev/null 2>&1; then
-            chown -R diradmin:diradmin "${WEB_MRTG_DIR}" 2>/dev/null || true
-        fi
-        chmod 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
-        find "${WEB_MRTG_DIR}" -type f -exec chmod 644 {} \; 2>/dev/null || true
-    else
-        chown -R "${WEB_USER}:${WEB_GROUP}" "${WEB_MRTG_DIR}" 2>/dev/null || true
-        chmod -R 755 "${WEB_MRTG_DIR}" 2>/dev/null || true
+    backup_config
+
+    log "INFO" "Removing cron..."
+    crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab - || true
+
+    if [[ -f /etc/logrotate.d/mrtg ]]; then
+        log "INFO" "Removing logrotate configuration..."
+        rm -f /etc/logrotate.d/mrtg
     fi
 
-    log "SUCCESS" "Initialization complete - MRTG data seeded"
+    if [[ -f /etc/apache2/conf-available/mrtg.conf ]]; then
+        log "INFO" "Removing Apache configuration..."
+        a2disconf mrtg >/dev/null 2>&1 || true
+        rm -f /etc/apache2/conf-available/mrtg.conf
+        systemctl reload apache2 2>/dev/null || true
+    fi
+    if [[ -f /etc/httpd/conf.d/mrtg.conf ]]; then
+        log "INFO" "Removing Apache configuration..."
+        rm -f /etc/httpd/conf.d/mrtg.conf
+        systemctl reload httpd 2>/dev/null || true
+    fi
+
+    if [[ -d "/usr/local/directadmin/plugins/mrtg" ]]; then
+        log "INFO" "Removing DirectAdmin plugin..."
+        rm -rf "/usr/local/directadmin/plugins/mrtg"
+    fi
+
+    if confirm_action "Remove MRTG and SNMP packages?"; then
+        log "INFO" "Removing packages..."
+        case "${OS_ID}" in
+            ubuntu|debian)
+                apt-get remove --purge -y mrtg snmpd snmp || true
+                ;;
+            centos|rhel|almalinux|rocky|fedora)
+                yum remove -y mrtg net-snmp net-snmp-utils || true
+                ;;
+        esac
+    fi
+
+    if confirm_action "Remove all MRTG data?"; then
+        log "INFO" "Removing files..."
+        rm -rf "${MRTG_BASE}" "${MRTG_VAR}" "${WEB_MRTG_DIR}" || true
+
+        local snmp_backup=$(ls -1 /etc/snmp/snmpd.conf.backup.* 2>/dev/null | head -1)
+        if [[ -n "${snmp_backup}" ]] && confirm_action "Restore original SNMP config?"; then
+            cp "${snmp_backup}" /etc/snmp/snmpd.conf || true
+            systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
+        fi
+    fi
+
+    log "SUCCESS" "Uninstall completed"
 }
 
 # =============================================================================
 # INSTALLATION WIZARD
 # =============================================================================
-
 installation_wizard() {
     clear
-    # Use unquoted EOF to allow variable expansion
     cat << EOF
 ================================================================================
                  PROFESSIONAL MONITORING SUITE ${SCRIPT_VERSION}
@@ -2548,7 +2254,6 @@ EOF
         echo -e "  Control Panel: ${GREEN}${PANEL_TYPE}${NC}"
     fi
 
-    # Show detected services
     local services=()
     [[ "${HAS_RSPAMD}" == true ]] && services+=("Rspamd")
     [[ "${HAS_MYSQL}" == true ]] && services+=("MySQL")
@@ -2563,13 +2268,11 @@ EOF
     echo -e "\n${BOLD}Configuration:${NC}"
 
     if [[ "${AUTO_MODE}" == true ]]; then
-        # Auto mode - use defaults
         INTERVAL=${DEFAULT_INTERVAL}
-        SNMP_COMMUNITY=${SNMP_COMMUNITY:-}  # will auto-generate later
+        SNMP_COMMUNITY=${SNMP_COMMUNITY:-}
         DEFAULT_EMAIL=${DEFAULT_EMAIL}
         log "INFO" "Auto mode enabled - using default values"
     else
-        # Interactive mode - ask user
         read -p "Monitoring interval in minutes [${DEFAULT_INTERVAL}]: " interval
         INTERVAL=${interval:-${DEFAULT_INTERVAL}}
 
@@ -2600,9 +2303,6 @@ EOF
     install_dependencies
     create_directories
 
-    # -------------------------------------------------------------------------
-    # Retry logic for SNMP configuration (Debian 12 robustness)
-    # -------------------------------------------------------------------------
     log "INFO" "Configuring SNMP..."
     if ! configure_snmp; then
         log "WARNING" "SNMP initial setup failed, attempting service repair..."
@@ -2621,7 +2321,6 @@ EOF
     generate_mrtg_config
     setup_web_access
 
-    # Setup panel integration
     if [[ "${PANEL_TYPE}" == "directadmin" ]]; then
         setup_directadmin_plugin
     else
@@ -2632,11 +2331,9 @@ EOF
     setup_logrotate
     initialize_mrtg
 
-    # Save config
     cat > "${MRTG_CONF}/install.conf" << EOF
 # MRTG Installation Configuration
 # Generated: $(date)
-# This file contains installation settings - DO NOT EDIT manually
 WEB_ROOT="${WEB_ROOT}"
 WEB_USER="${WEB_USER}"
 WEB_GROUP="${WEB_GROUP}"
@@ -2677,13 +2374,12 @@ EOF
     fi
 
     echo ""
-    verify_system_health || true  # Don't exit even if health check finds issues
+    verify_system_health || true
 }
 
 # =============================================================================
 # INTERACTIVE MENU
 # =============================================================================
-
 show_menu() {
     clear
     cat << EOF
@@ -2776,144 +2472,12 @@ EOF
     esac
 
     echo ""
-    # Menu loops in main()
-}
-
-# =============================================================================
-# DIRECTADMIN PLUGIN INTEGRATION (with native plugin structure)
-# =============================================================================
-configure_panel_integration() {
-    if [[ "${PANEL_TYPE}" == "none" ]] || [[ "${DRY_RUN}" == true ]]; then
-        return 0
-    fi
-
-    log "INFO" "Configuring ${PANEL_TYPE} integration..."
-
-    case "${PANEL_TYPE}" in
-        "directadmin")
-            setup_directadmin_plugin
-            ;;
-
-        "cpanel")
-            if [[ -d "/usr/local/apache/htdocs" ]]; then
-                ln -sfn "${WEB_MRTG_DIR}" "/usr/local/apache/htdocs/mrtg" 2>/dev/null || true
-                log "SUCCESS" "cPanel integration configured"
-            fi
-            ;;
-
-        "plesk")
-            if [[ -d "/var/www/vhosts/default/htdocs" ]]; then
-                ln -sfn "${WEB_MRTG_DIR}" "/var/www/vhosts/default/htdocs/mrtg" 2>/dev/null || true
-                log "SUCCESS" "Plesk integration configured"
-            fi
-            ;;
-    esac
-}
-
-# =============================================================================
-# UNINSTALL FUNCTIONS – FIXED: Do not source install.conf due to readonly variables
-# Use defaults instead (uninstall already knows paths)
-# =============================================================================
-uninstall_mrtg() {
-    log "INFO" "Starting uninstall..."
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        log "INFO" "Would perform uninstall"
-        return 0
-    fi
-
-    # Set defaults for uninstall (they are the same as installation defaults)
-    WEB_MRTG_DIR="${WEB_MRTG_DIR:-/var/www/html/mrtg}"
-    WEB_USER="${WEB_USER:-diradmin}"
-    WEB_GROUP="${WEB_GROUP:-diradmin}"
-    PANEL_TYPE="${PANEL_TYPE:-directadmin}"
-    OS_ID="${OS_ID:-debian}"
-
-    if [[ "${FORCE_MODE}" != true ]]; then
-        echo -e "${RED}${BOLD}WARNING: This will remove MRTG and all configurations${NC}"
-        echo -e "Affected:"
-        echo -e "  - ${MRTG_BASE}"
-        echo -e "  - ${WEB_MRTG_DIR}"
-        echo -e "  - /etc/snmp/snmpd.conf"
-        echo -e "  - MRTG cron jobs"
-        echo -e "  - DirectAdmin plugin (if installed)"
-        echo -e "  - Logrotate configuration"
-        echo -e "  - Apache MRTG configuration"
-        echo ""
-
-        if ! confirm_action "Continue with uninstall?"; then
-            log "INFO" "Uninstall cancelled"
-            return 0
-        fi
-    fi
-
-    # Backup
-    backup_config
-
-    # Remove cron
-    log "INFO" "Removing cron..."
-    crontab -l 2>/dev/null | grep -v "run-mrtg.sh" | grep -v "mrtg" | crontab - || true
-
-    # Remove logrotate
-    if [[ -f /etc/logrotate.d/mrtg ]]; then
-        log "INFO" "Removing logrotate configuration..."
-        rm -f /etc/logrotate.d/mrtg
-    fi
-
-    # Remove Apache configuration
-    if [[ -f /etc/apache2/conf-available/mrtg.conf ]]; then
-        log "INFO" "Removing Apache configuration..."
-        a2disconf mrtg >/dev/null 2>&1 || true
-        rm -f /etc/apache2/conf-available/mrtg.conf
-        systemctl reload apache2 2>/dev/null || true
-    fi
-    if [[ -f /etc/httpd/conf.d/mrtg.conf ]]; then
-        log "INFO" "Removing Apache configuration..."
-        rm -f /etc/httpd/conf.d/mrtg.conf
-        systemctl reload httpd 2>/dev/null || true
-    fi
-
-    # Remove DirectAdmin plugin
-    if [[ -d "/usr/local/directadmin/plugins/mrtg" ]]; then
-        log "INFO" "Removing DirectAdmin plugin..."
-        rm -rf "/usr/local/directadmin/plugins/mrtg"
-    fi
-
-    # Remove packages?
-    if confirm_action "Remove MRTG and SNMP packages?"; then
-        log "INFO" "Removing packages..."
-        case "${OS_ID}" in
-            ubuntu|debian)
-                apt-get remove --purge -y mrtg snmpd snmp || true
-                ;;
-            centos|rhel|almalinux|rocky|fedora)
-                yum remove -y mrtg net-snmp net-snmp-utils || true
-                ;;
-        esac
-    fi
-
-    # Remove data?
-    if confirm_action "Remove all MRTG data?"; then
-        log "INFO" "Removing files..."
-        rm -rf "${MRTG_BASE}" "${MRTG_VAR}" "${WEB_MRTG_DIR}" || true
-
-        # Restore SNMP config?
-        local snmp_backup=$(ls -1 /etc/snmp/snmpd.conf.backup.* 2>/dev/null | head -1)
-        if [[ -n "${snmp_backup}" ]] && confirm_action "Restore original SNMP config?"; then
-            cp "${snmp_backup}" /etc/snmp/snmpd.conf || true
-            systemctl restart snmpd 2>/dev/null || service snmpd restart 2>/dev/null || true
-        fi
-    fi
-
-    log "SUCCESS" "Uninstall completed"
 }
 
 # =============================================================================
 # COMMAND LINE INTERFACE
 # =============================================================================
-
 print_help() {
-    # Use raw text without color codes for help output to avoid display issues
     echo "NAME"
     echo "    ${SCRIPT_NAME} - MRTG Professional Monitoring Suite ${SCRIPT_VERSION}"
     echo ""
@@ -2958,18 +2522,14 @@ print_help() {
 # =============================================================================
 # MAIN
 # =============================================================================
-
 main() {
-    # Create log file
     touch "${LOG_FILE}" 2>/dev/null || true
     chmod 644 "${LOG_FILE}" 2>/dev/null || true
 
-    # Set default values for optional arguments
     FORCE_MODE=${FORCE_MODE:-false}
     DRY_RUN=${DRY_RUN:-false}
     AUTO_MODE=${AUTO_MODE:-false}
 
-    # Parse arguments
     if [[ $# -gt 0 ]]; then
         case $1 in
             --install|-i)
@@ -2978,7 +2538,6 @@ main() {
                 ;;
             --uninstall|-u)
                 check_root
-                # Check for --force flag
                 if [[ $# -gt 1 && "$2" == "--force" ]]; then
                     FORCE_MODE=true
                 fi
@@ -3030,7 +2589,6 @@ main() {
                 ;;
             --force)
                 FORCE_MODE=true
-                # Remove --force from args and continue
                 shift
                 main "$@"
                 ;;
@@ -3053,9 +2611,7 @@ main() {
     fi
 }
 
-# Trap
 trap 'rm -f "${LOCK_FILE}"' EXIT
 trap 'error_handler $? $LINENO' ERR
 
-# Run main function
 main "$@"
