@@ -41,6 +41,11 @@ For bulk deployment via Ansible or SSH loops:
 ./install-mrtg.sh --auto
 ```
 
+After install run this once
+```bash
+env LANG=C /usr/bin/mrtg /usr/local/mrtg/conf/mrtg.cfg
+```
+
 📈 Monitored Metrics
 
 Category	Description
